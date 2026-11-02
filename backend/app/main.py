@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from .config import BASE_DIR, MOCK_MODE, ALLOW_REMOTE_NETWORK
 from .database import init_db
 from .task_worker import worker_instance
-from .routers import batches, designs, slots, export, media, system, smart_planning
+from .auto_planning_service import planner_worker
+from .routers import batches, designs, slots, export, media, system, smart_planning, workbench
 from .budget_service import BudgetHardLimitExceededError, BudgetWarningExceededError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
@@ -25,10 +26,12 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info(f"System operating in MOCK_MODE={MOCK_MODE}, ALLOW_REMOTE_NETWORK={ALLOW_REMOTE_NETWORK}")
     await worker_instance.start()
+    await planner_worker.start()
     yield
     # 关闭阶段
     logger.info("Stopping background TaskWorker...")
     await worker_instance.stop()
+    await planner_worker.stop()
 
 app = FastAPI(
     title="酒店家具智能套图工作台 (Hotel Furniture Workbench)",
@@ -61,6 +64,7 @@ app.include_router(export.router)
 app.include_router(media.router)
 app.include_router(system.router)
 app.include_router(smart_planning.router)
+app.include_router(workbench.router)
 
 STATIC_DIR = BASE_DIR / "static"
 

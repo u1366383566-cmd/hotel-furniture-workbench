@@ -26,7 +26,7 @@ class UserContext:
 
     @property
     def is_admin(self) -> bool:
-        return self.role == "admin"
+        return self.role in ("admin", "leader")
 
 def get_current_user(
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
@@ -62,7 +62,7 @@ def require_roles(allowed_roles: List[str]):
         x_user_id: Optional[str] = Header(None, alias="X-User-ID")
     ) -> UserContext:
         user = get_current_user(x_user_role, x_user_id)
-        if user.role not in allowed_roles:
+        if user.role not in allowed_roles and not (user.role == 'leader' and 'admin' in allowed_roles):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"权限不足: 当前角色 '{user.role}' 无权执行此操作，需要 {allowed_roles}"

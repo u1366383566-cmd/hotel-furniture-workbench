@@ -51,6 +51,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('batches', 'smart_planning', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'planning_confirmed', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'planning_brief', "TEXT NOT NULL DEFAULT ''")
+    add_col_if_missing('batches', 'auto_workflow', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('budget_ledger', 'ledger_event_type', 'TEXT')
     add_col_if_missing('designs', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('designs', 'planning_status', "TEXT NOT NULL DEFAULT 'legacy'")
@@ -289,6 +290,23 @@ def init_db():
             timeout_seconds INTEGER NOT NULL DEFAULT 180,
             api_key TEXT,
             updated_by TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS workbench_settings (
+            id TEXT PRIMARY KEY, warning_per_group INTEGER NOT NULL DEFAULT 5,
+            hard_limit_per_group INTEGER NOT NULL DEFAULT 6
+        );
+        INSERT OR IGNORE INTO workbench_settings (id) VALUES ('default');
+
+        CREATE TABLE IF NOT EXISTS planning_jobs (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+            design_id TEXT NOT NULL UNIQUE REFERENCES designs(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'queued',
+            error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
 

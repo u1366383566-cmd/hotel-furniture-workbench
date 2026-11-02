@@ -110,7 +110,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
 
 def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_id: Optional[str] = None):
     cur = conn.cursor()
-    cur.execute("SELECT target_archived_count, current_archived_count, is_circuit_broken, smart_planning, planning_confirmed, status FROM batches WHERE id = ?", (batch_id,))
+    cur.execute("SELECT target_archived_count, current_archived_count, is_circuit_broken, smart_planning, planning_confirmed, auto_workflow, status FROM batches WHERE id = ?", (batch_id,))
     b_row = cur.fetchone()
     if not b_row:
         return
@@ -134,6 +134,8 @@ def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_i
           AND status IN ('panorama_generating', 'panorama_review', 'panorama_approved', 'downstream_generating', 'quad_review')
     """, (batch_id,))
     in_flight = cur.fetchone()["in_flight"]
+    if b_row['auto_workflow']:
+        in_flight += conn.execute("SELECT COUNT(*) AS n FROM planning_jobs p JOIN designs d ON d.id=p.design_id WHERE p.batch_id=? AND d.status='draft' AND p.status IN ('queued','running','failed')", (batch_id,)).fetchone()['n']
 
     effective_groups = current_archived + in_flight
     if effective_groups >= target_archived:
@@ -153,6 +155,9 @@ def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_i
         stby = cur.fetchone()
 
     if not stby:
+        if b_row['auto_workflow'] and series_id:
+            from ..auto_planning_service import queue_replacement
+            queue_replacement(conn,batch_id,series_id)
         return
 
     stby_id = stby["id"]
@@ -429,6 +434,7 @@ def review_panorama(
 @router.post("/{design_id}/start_downstream")
 def start_downstream(
     design_id: str,
+    expected_panorama_version_id: Optional[str] = None,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     """
@@ -464,6 +470,8 @@ def start_downstream(
         if not p_row or p_row["status"] != "approved" or not p_row["current_version_id"]:
             raise HTTPException(status_code=400, detail="全景当前版本异常或未通过，无法作为下游依据")
         pano_vid = p_row["current_version_id"]
+        if expected_panorama_version_id and expected_panorama_version_id != pano_vid:
+            raise HTTPException(status_code=409, detail='全景版本已变化，请重新审核')
 
         downstream_slots = ["white_isolated", "twin_bed", "nightstand_closeup"]
         for stype in downstream_slots:

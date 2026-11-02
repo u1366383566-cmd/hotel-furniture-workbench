@@ -79,9 +79,20 @@ def _queue_initial_panorama(conn, batch_id: str, design_id: str, code: str) -> s
 @router.post("", response_model=BatchResponse)
 def create_batch(
     req: BatchCreateRequest,
-    user: UserContext = Depends(require_roles(["leader", "admin"]))
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     batch_id = f"batch_{uuid.uuid4().hex[:8]}"
+    if user.role == 'operator' and not req.auto_workflow:
+        raise HTTPException(status_code=403, detail='普通用户只能创建自动规划任务')
+    if req.auto_workflow:
+        if not req.smart_planning or req.auto_start_panorama or any(c.get('standby', 0) for c in req.series_counts.values()):
+            raise HTTPException(status_code=400, detail='自动任务应使用智能规划且不预设候补')
+        if sum(c.get('primary', 0) for c in req.series_counts.values()) != req.target_archived_count:
+            raise HTTPException(status_code=400, detail='各系列组数之和必须等于任务目标')
+        with get_db() as settings_conn:
+            settings = settings_conn.execute("SELECT warning_per_group, hard_limit_per_group FROM workbench_settings WHERE id='default'").fetchone()
+        req = req.model_copy(update={'warning_budget': req.target_archived_count * settings['warning_per_group'],
+                                     'hard_limit_budget': req.target_archived_count * settings['hard_limit_per_group']})
     if req.target_archived_count >= 10 and req.hard_limit_budget <= DEFAULT_HARD_LIMIT_BUDGET:
         raise HTTPException(
             status_code=400,
@@ -125,6 +136,8 @@ def create_batch(
         if req.smart_planning:
             conn.execute("UPDATE batches SET smart_planning = 1, planning_brief = ?, pause_reason = 'PLANNING_REQUIRED' WHERE id = ?",
                          (req.planning_brief.strip(), batch_id))
+        if req.auto_workflow:
+            conn.execute("UPDATE batches SET auto_workflow=1, planning_confirmed=1, status='active', pause_reason=NULL WHERE id=?", (batch_id,))
 
         conn.execute("""
             INSERT INTO watermark_configs (
@@ -165,6 +178,8 @@ def create_batch(
                 # 记录规划模型成本记账流水
                 if req.smart_planning:
                     conn.execute("UPDATE designs SET planning_status='pending' WHERE id=?", (d_id,))
+                    if req.auto_workflow:
+                        conn.execute("INSERT INTO planning_jobs (id,batch_id,design_id) VALUES (?,?,?)", (f'plan_{uuid.uuid4().hex}', batch_id, d_id))
                 else:
                     plan_bgt_id = f"bgt_plan_{uuid.uuid4().hex[:8]}"
                     conn.execute("""
@@ -249,6 +264,7 @@ def list_batches(user: UserContext = Depends(require_roles(["operator", "leader"
                 trial_run_remaining=r["trial_run_remaining"],
                 approved_rule_snapshot_status=r["approved_rule_snapshot_status"],
                 smart_planning=bool(r["smart_planning"]), planning_confirmed=bool(r["planning_confirmed"]),
+                auto_workflow=bool(r["auto_workflow"]),
                 created_at=r["created_at"],
                 updated_at=r["updated_at"]
             ))
@@ -280,6 +296,7 @@ def get_batch_by_id(batch_id: str, user: UserContext = Depends(require_roles(["o
             trial_run_remaining=r["trial_run_remaining"],
             approved_rule_snapshot_status=r["approved_rule_snapshot_status"],
             smart_planning=bool(r["smart_planning"]), planning_confirmed=bool(r["planning_confirmed"]),
+            auto_workflow=bool(r["auto_workflow"]),
             created_at=r["created_at"],
             updated_at=r["updated_at"]
         )

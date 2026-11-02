@@ -293,7 +293,7 @@ def trigger_protected_cleanup(
 @router.get("/batches/{batch_id}/unknown_tasks")
 def get_unknown_tasks(
     batch_id: str,
-    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
+    user: UserContext = Depends(require_roles(["leader", "admin"]))
 ):
     with get_db(immediate=False) as conn:
         cur = conn.cursor()
@@ -486,7 +486,7 @@ def resolve_unknown_task(
 @router.get("/batches/{batch_id}/audit_logs")
 def get_audit_logs(
     batch_id: str,
-    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
+    user: UserContext = Depends(require_roles(["leader", "admin"]))
 ):
     with get_db(immediate=False) as conn:
         cur = conn.cursor()

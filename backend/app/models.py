@@ -11,6 +11,7 @@ class BatchCreateRequest(BaseModel):
     hard_limit_budget: int = Field(default=25, ge=1)
     auto_start_panorama: bool = Field(default=True, description="是否自动开始首发全景生成")
     smart_planning: bool = False
+    auto_workflow: bool = False
     planning_brief: str = Field(default="", max_length=2000)
     series_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)
 
@@ -33,6 +34,7 @@ class BatchResponse(BaseModel):
     approved_rule_snapshot_status: str = "legacy_unfrozen"
     smart_planning: bool = False
     planning_confirmed: bool = False
+    auto_workflow: bool = False
     created_at: str
     updated_at: str
 

@@ -94,7 +94,7 @@ def _candidates(conn, row):
 
 
 def _design(conn, design_id):
-    row = conn.execute('''SELECT d.*, b.smart_planning, b.planning_confirmed, b.planning_brief,
+    row = conn.execute('''SELECT d.*, b.smart_planning, b.planning_confirmed, b.planning_brief, b.auto_workflow,
                          b.approved_series_rules_json FROM designs d JOIN batches b ON b.id=d.batch_id
                          WHERE d.id=?''', (design_id,)).fetchone()
     if not row:
@@ -104,7 +104,8 @@ def _design(conn, design_id):
 
 def _editable(row):
     append_draft = row['is_standby'] and row['planning_status'] in ('pending_append', 'ready_append')
-    if not row['smart_planning'] or (row['planning_confirmed'] and not append_draft) or row['status'] != 'draft':
+    automated = row['auto_workflow'] and row['planning_status'] in ('pending', 'ready')
+    if not row['smart_planning'] or (row['planning_confirmed'] and not append_draft and not automated) or row['status'] != 'draft':
         raise HTTPException(409, '只有尚未确认的智能规划草稿可修改')
 
 
@@ -165,7 +166,7 @@ def generate(design_id: str, req: ReplanRequest, user: UserContext = Depends(req
         for key in (*FIELDS, 'main_materials', 'color_scheme', 'companion_items', 'soft_furnishings', 'design_difference', 'panorama_prompt'):
             spec[key] = generated[key]
         spec['planning_basis'] = 'llm_confirmable_proposal'
-        next_status = 'ready_append' if current['planning_confirmed'] else 'ready'
+        next_status = 'ready_append' if current['planning_confirmed'] and not current['auto_workflow'] else 'ready'
         conn.execute("UPDATE designs SET structured_spec=?, planning_status=?, updated_at=datetime('now','localtime') WHERE id=?", (json.dumps(spec, ensure_ascii=False), next_status, design_id))
         conn.execute("INSERT INTO audit_logs (id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'plan_design',?,?,?)", (f'aud_{uuid.uuid4().hex}', row['batch_id'], user.user_id, user.role, json.dumps({'design_id': design_id, 'model': cfg['model'], 'reference_ids': [h['id'] for h in history]})))
     return {'message': '方案已生成'}
