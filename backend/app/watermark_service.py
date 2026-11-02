@@ -3,7 +3,7 @@ import math
 from pathlib import Path
 from typing import Dict, Any, Optional
 from PIL import Image, ImageDraw, ImageFont
-from .config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, DEFAULT_WATERMARK
+from .config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, DEFAULT_WATERMARK, BASE_DIR
 
 def get_default_font(size: int = 24) -> ImageFont.ImageFont:
     """获取默认字体，跨平台 fallback"""
@@ -160,47 +160,16 @@ def apply_watermark(
     position: str = "bottom_right"
 ) -> Image.Image:
     """
-    给图像施加品牌主水印和倾斜轻量防盗重复水印。
-    采用 RGBA 合成，不破坏原图主要结构。
+    统一添加 SEEZO 标识。保留历史参数以兼容既有调用与配置。
     """
     base = image.convert("RGBA")
-    txt_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(txt_layer)
-
-    # 1. 倾斜平铺防盗轻量重复水印（贴片已缓存，直接贴图）
-    rotated = _get_repeat_tile(repeat_text, font_size, opacity)
-    step_x = 260
-    step_y = 160
-    for y in range(-200, base.height + 200, step_y):
-        for x in range(-200, base.width + 200, step_x):
-            txt_layer.paste(rotated, (x, y), rotated)
-
-    # 2. 品牌主水印
-    main_font = get_default_font(font_size)
-    main_alpha = int(255 * opacity)
-    main_fill = (40, 50, 70, main_alpha)
-    box_fill = (255, 255, 255, int(main_alpha * 0.75))
-
-    bbox = draw.textbbox((0, 0), main_text, font=main_font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-
-    pad = 16
-    if position == "bottom_right":
-        bx = base.width - tw - pad * 2 - 40
-        by = base.height - th - pad * 2 - 80
-    elif position == "center":
-        bx = (base.width - tw - pad * 2) // 2
-        by = (base.height - th - pad * 2) // 2
-    else: # bottom_left
-        bx = 40
-        by = base.height - th - pad * 2 - 80
-
-    draw.rectangle([bx, by, bx + tw + pad * 2, by + th + pad * 2], fill=box_fill, outline=(180, 190, 210, main_alpha), width=2)
-    draw.text((bx + pad, by + pad), main_text, fill=main_fill, font=main_font)
-
-    out = Image.alpha_composite(base, txt_layer)
-    return out.convert("RGB")
+    with Image.open(BASE_DIR / 'static' / 'seezo-watermark.png') as source:
+        logo = source.convert('RGBA')
+    width = max(1, round(base.width * 0.20))
+    height = max(1, round(width * logo.height / logo.width))
+    logo = logo.resize((width, height), Image.Resampling.LANCZOS)
+    base.alpha_composite(logo, (0, round(base.height * 0.02)))
+    return base.convert('RGB')
 
 def save_real_slot_image(
     raw_bytes: bytes,
