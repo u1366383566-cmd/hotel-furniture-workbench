@@ -1,0 +1,18 @@
+# 统一文本文件在仓库中以 LF 存储，工作区按平台检出
+* text=auto eol=lf
+
+# Windows 批处理必须保持 CRLF，否则在 cmd 下可能执行异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.db binary
+*.sqlite binary
+*.wasm binary

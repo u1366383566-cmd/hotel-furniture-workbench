@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>酒店家具智能套图工作台 | 视觉设计闭环</title>
+  <link rel="stylesheet" href="/static/tailwind-lite.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="min-h-screen flex flex-col text-inkBody">
+
+  <!-- 顶栏 -->
+  <header class="wb-header">
+    <div class="wb-header-inner">
+
+      <!-- Logo 与标题 -->
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="logo-square grad-btn shrink-0">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+            <path d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <h1 class="text-[15px] font-black text-inkTitle tracking-tight whitespace-nowrap">酒店家具智能套图工作台</h1>
+            <span class="mock-chip"><span class="dot-pulse"></span>本地 Mock 闭环</span>
+          </div>
+          <p class="hidden md:block text-[11px] text-inkMuted">非生产证明 · 专注酒店定制视觉方案与四图终审</p>
+        </div>
+      </div>
+
+      <!-- 批次切换 + 角色模拟器 -->
+      <div class="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-[11px] text-inkMuted whitespace-nowrap hidden sm:block">当前批次</span>
+          <div id="batch-dd-holder" class="w-44 sm:w-60 min-w-0">
+            <select id="batch-select" aria-label="选择当前生产批次">
+              <option value="">加载中...</option>
+            </select>
+          </div>
+        </div>
+        <button id="btn-new-batch" class="wb-btn wb-btn-ghost shrink-0">+ 新建批次</button>
+        <div class="seg shrink-0" role="group" aria-label="切换模拟角色">
+          <button class="role-btn seg-btn seg-active" data-role="operator">操作员</button>
+          <button class="role-btn seg-btn" data-role="leader">负责人</button>
+          <button class="role-btn seg-btn" data-role="admin">管理员</button>
+        </div>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- 主容器 -->
+  <main class="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 flex-1 w-full space-y-5">
+
+    <!-- 批次状态 & 预算仪表盘 -->
+    <section class="wb-card p-5">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-lineLight">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h2 id="current-batch-name" class="text-base font-black text-inkTitle tracking-tight">未选择批次</h2>
+            <span id="current-batch-status" class="wb-badge wb-badge-slate">加载中</span>
+          </div>
+          <p id="current-batch-series" class="text-xs text-inkMuted mt-1 truncate">启用系列: 现代商务 / 自然木质 / 柔和当代</p>
+        </div>
+
+        <!-- 归档目标进度 -->
+        <div class="flex items-center gap-4 shrink-0">
+          <div class="text-right">
+            <div class="text-[11px] text-inkMuted">归档达成进度</div>
+            <div class="text-sm font-bold text-inkTitle font-mono mt-0.5"><span id="metric-archived">0</span> / <span id="metric-target">3</span> 组</div>
+          </div>
+          <div class="w-28 h-2 bg-slate-100 rounded-full overflow-hidden border border-lineLight">
+            <div id="progress-archived" class="grad-bar h-full w-0 transition-all duration-300"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 主预算水位 + 次级指标 -->
+      <div class="pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <div class="lg:col-span-7 min-w-0">
+          <div class="flex items-end justify-between gap-3">
+            <div>
+              <div class="text-[11px] text-inkMuted">生图额度水位</div>
+              <div class="mt-1 flex items-baseline gap-2">
+                <span id="metric-used" class="text-3xl font-black text-inkTitle font-mono leading-none">0</span>
+                <span class="text-xs text-inkMuted">次已消耗</span>
+                <span class="text-xs text-inkMuted font-mono">/ 硬上限 <span id="metric-hardlimit" class="text-rose-500 font-bold">25 次</span></span>
+              </div>
+            </div>
+            <div class="text-right text-[11px] text-inkMuted whitespace-nowrap">预警线 <span id="metric-warning" class="font-mono font-bold text-inkBody">20 次</span><br>暂停新任务</div>
+          </div>
+
+          <!-- 分段进度条: 填充 = 已消耗/硬上限; 刻度 = 预警线/硬上限 -->
+          <div class="relative mt-2.5 h-3 w-full" aria-label="生图预算水位条">
+            <div class="absolute inset-0 bg-slate-100 rounded-full border border-lineLight overflow-hidden">
+              <div id="budget-bar-fill" class="grad-bar h-full w-0 transition-all duration-500"></div>
+            </div>
+            <div id="budget-warning-tick" class="budget-tick budget-tick-warning" style="left:80%"></div>
+            <div class="budget-tick budget-tick-hard" style="left:100%"></div>
+          </div>
+          <div class="mt-1.5 flex items-center justify-between text-[10px] text-slate-300 font-mono">
+            <span>0</span><span class="text-amber-600">预警线</span><span class="text-rose-400">硬上限</span>
+          </div>
+
+          <div class="mt-3 flex items-center gap-2 flex-wrap">
+            <button id="btn-approve-warning" class="wb-btn wb-btn-amber hidden" title="仅负责人可特批">批准越过预警线</button>
+            <button id="btn-recover-circuit" class="wb-btn wb-btn-danger hidden">恢复熔断并试运行</button>
+            <button id="btn-start-batch" class="wb-btn wb-btn-soft-blue hidden">启动首发全景 (Leader)</button>
+          </div>
+        </div>
+
+        <!-- 次级成本指标 -->
+        <div class="lg:col-span-5 flex flex-wrap gap-1.5 content-start lg:justify-end">
+          <div class="metric-chip"><span class="metric-label">在途预占</span><span class="metric-val text-primary-600" id="metric-reserved">0 次</span></div>
+          <div class="metric-chip"><span class="metric-label">规划模型</span><span class="metric-val" id="metric-planning">0 次</span></div>
+          <div class="metric-chip"><span class="metric-label">视觉分析</span><span class="metric-val" id="metric-vision">0 次</span></div>
+          <div class="metric-chip"><span class="metric-label">技术重试 (429)</span><span class="metric-val text-amber-600" id="metric-technical-retry">0 次</span></div>
+          <div class="metric-chip"><span class="metric-label">失败释放额度</span><span class="metric-val" id="metric-failed">0 次</span></div>
+          <div class="metric-chip"><span class="metric-label">结果未知挂起</span><span class="metric-val text-violet-600" id="metric-unknown">0 笔</span></div>
+          <div class="metric-chip"><span class="metric-label">未结算流水</span><span class="metric-val text-amber-700" id="metric-unsettled">0 次</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 业务工作台导航 (胶囊分段) -->
+    <nav class="wb-nav-wrap" aria-label="工作台分区导航">
+      <div class="seg">
+        <button class="tab-btn seg-btn seg-active" data-tab="panorama">全景初筛区 <span id="badge-pano-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="quad">四图终审区 <span id="badge-quad-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="standby">候补备选池 <span id="badge-standby-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="archived">已归档与导出 <span id="badge-archived-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="system">未知保护与系统设置</button>
+      </div>
+    </nav>
+
+    <!-- 选项卡内容区 -->
+    <div id="tab-content">
+
+      <!-- 1. 全景初筛区 -->
+      <div id="tab-panel-panorama" class="space-y-4">
+        <div id="plan-start-hint" class="plan-start-hint hidden" role="status">
+          <div><strong>方案已确认，等待启动全景</strong><p>当前还没有派发生图任务；负责人核对预算后，点击下方按钮开始生成正式款。</p></div>
+          <button id="btn-start-from-plans" class="wb-btn wb-btn-grad">启动首发全景</button>
+        </div>
+        <section id="smart-planning-panel" class="wb-card p-5 space-y-4 hidden">
+          <div><h3 id="plan-panel-title" class="text-sm font-bold text-inkTitle">生图前设计规划</h3><p id="plan-panel-description" class="text-xs text-inkMuted">先生成并审核正式款与候补款，核对相似提醒后由负责人确认；确认后再启动全景。</p></div>
+          <div class="flex gap-2"><button id="btn-plan-all" class="wb-btn wb-btn-dark">规划未完成方案</button><button id="btn-plan-confirm" class="wb-btn wb-btn-grad">确认全部方案</button></div>
+          <p id="plan-progress" class="text-xs text-inkMuted" aria-live="polite"></p>
+          <div id="planning-cards" class="space-y-3"></div>
+        </section>
+        <div class="flex items-center justify-between gap-3 text-xs text-inkMuted">
+          <p class="min-w-0">第一阶段审核：评估空间透视、床体及背板比例、材质与系列协调性。通过后锁定全景作为下游视觉基准。</p>
+          <button id="btn-refresh-designs" class="text-primary-600 hover:text-primary-700 hover:underline whitespace-nowrap shrink-0 text-xs">刷新列表</button>
+        </div>
+        <div id="panorama-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <!-- 动态渲染全景卡片 -->
+        </div>
+      </div>
+
+      <!-- 2. 四图终审区 -->
+      <div id="tab-panel-quad" class="space-y-5 hidden">
+        <div class="text-xs text-inkMuted">
+          四图终审对照：全景通过后由人工启动下游三图生成；四图就绪后对照终审，合格一键归档，支持单张重做与版本回选。
+        </div>
+        <div id="quad-designs-list" class="space-y-6">
+          <!-- 动态渲染四图对照列表 -->
+        </div>
+      </div>
+
+      <!-- 3. 候补备选池 -->
+      <div id="tab-panel-standby" class="space-y-4 hidden">
+        <div class="flex items-center justify-between gap-3">
+          <p class="text-xs text-inkMuted min-w-0">
+            首发设计淘汰或产生缺口时，系统按原批准规则自动按序唤醒候补并派发全景任务。候补耗尽后负责人可追加候补。
+          </p>
+          <button id="btn-append-standby" class="wb-btn wb-btn-soft-blue shrink-0">+ 追加候补方案 (Leader)</button>
+        </div>
+        <div id="standby-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <!-- 动态渲染候补卡片 -->
+        </div>
+      </div>
+
+      <!-- 4. 已归档与导出 -->
+      <div id="tab-panel-archived" class="space-y-4 hidden">
+        <div class="flex items-center justify-between gap-3 wb-card p-4">
+          <div class="min-w-0">
+            <h3 class="text-sm font-bold text-inkTitle">批次归档套图打包</h3>
+            <p class="text-xs text-inkMuted mt-0.5">将当前批次所有已归档通过的设计重新压制最终水印并导出标准 ZIP。</p>
+          </div>
+          <button id="btn-export-batch-zip" class="wb-btn wb-btn-grad shrink-0">导出批次全部已归档 ZIP</button>
+        </div>
+        <div id="archived-designs-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <!-- 动态渲染已归档套图 -->
+        </div>
+        <div class="wb-card p-4">
+          <div class="flex items-center justify-between gap-3 mb-2">
+            <h3 class="text-sm font-bold text-inkTitle">导出记录 (可追踪)</h3>
+            <button id="btn-refresh-exports" class="text-xs text-primary-600 hover:text-primary-700 hover:underline">刷新记录</button>
+          </div>
+          <div id="export-records-container" class="max-h-48 overflow-y-auto custom-scrollbar space-y-1.5 text-xs text-inkMuted">
+            <div class="text-slate-400 py-2 text-center">暂无导出记录</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. 未知保护与系统设置 -->
+      <div id="tab-panel-system" class="space-y-5 hidden">
+
+        <div class="wb-card p-5 space-y-3">
+          <div><h3 class="text-sm font-bold text-inkTitle">文本规划模型 (Leader / Admin)</h3>
+            <p class="text-xs text-inkMuted mt-0.5">独立配置风格规划所用的文本模型，兼容 /v1/chat/completions。</p></div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+            <div><label for="cfg-text-url">服务地址</label><input id="cfg-text-url" class="wb-input" placeholder="http://127.0.0.1:3000"></div>
+            <div><label for="cfg-text-model">模型名称</label><input id="cfg-text-model" class="wb-input" placeholder="模型名称"></div>
+            <div><label for="cfg-text-timeout">超时秒数</label><input id="cfg-text-timeout" class="wb-input" type="number" min="5" max="900" value="180"></div>
+          </div>
+          <label for="cfg-text-key">API 密钥（留空保留已有密钥）</label>
+          <input id="cfg-text-key" type="password" autocomplete="new-password" class="wb-input">
+          <div id="cfg-text-status" class="text-xs text-inkMuted"></div>
+          <button id="btn-text-save" class="wb-btn wb-btn-dark">保存文本模型配置</button>
+        </div>
+
+        <!-- 生图上游 API 配置 -->
+        <div class="wb-card p-5 space-y-3">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-inkTitle flex items-center gap-2">
+                生图上游 API (Leader / Admin)
+                <span id="cfg-api-mode-badge" class="wb-badge wb-badge-slate">Mock 模式</span>
+              </h3>
+              <p class="text-xs text-inkMuted mt-0.5">对接 OpenAI 兼容生图反代（/v1/images/generations）。启用后预算红线、失败分类、unknown 保护全部继续生效。</p>
+            </div>
+            <label class="flex items-center gap-2 text-xs font-semibold text-inkBody cursor-pointer shrink-0">
+              <input type="checkbox" id="cfg-api-enabled" aria-label="启用真实生图 API" class="accent-blue-600 w-4 h-4">
+              启用真实生图（关闭 = 本地 Mock）
+            </label>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+            <div>
+              <label class="block text-[11px] text-inkBody mb-1.5" for="cfg-api-base-url">上游地址 (Base URL)</label>
+              <input type="text" id="cfg-api-base-url" aria-label="生图上游地址" placeholder="http://127.0.0.1:3000" class="wb-input font-mono">
+            </div>
+            <div>
+              <label class="block text-[11px] text-inkBody mb-1.5" for="cfg-api-model">图片模型</label>
+              <input type="text" id="cfg-api-model" aria-label="生图模型名" placeholder="gpt-image-2" class="wb-input font-mono">
+            </div>
+            <div>
+              <label class="block text-[11px] text-inkBody mb-1.5" for="cfg-api-timeout">单次超时 (秒)</label>
+              <input type="number" id="cfg-api-timeout" aria-label="生图超时秒数" min="5" max="900" class="wb-input font-mono">
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5 items-end">
+            <div class="md:col-span-2">
+              <label class="block text-[11px] text-inkBody mb-1.5" for="cfg-api-key">API 密钥 (auth-key)</label>
+              <input type="password" id="cfg-api-key" aria-label="生图 API 密钥" autocomplete="new-password" placeholder="留空 = 保持已配置的密钥不变" class="wb-input font-mono">
+            </div>
+            <div class="text-[11px] text-inkMuted" id="cfg-api-key-status">密钥状态加载中...</div>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap pt-1">
+            <button id="btn-api-save-test" class="wb-btn wb-btn-grad">保存并测试连接</button>
+            <button id="btn-api-save" class="wb-btn wb-btn-dark">仅保存配置</button>
+            <span id="cfg-api-test-result" class="text-[11px] text-inkMuted font-mono"></span>
+          </div>
+
+          <div class="bg-amber-50 p-3 rounded-xl border border-amber-100 text-amber-800 text-[11px] leading-relaxed">
+            <span class="font-semibold">启用须知：</span>测试连接只核验「可达 + 鉴权」，不代表真实生图一定可用；
+            生图提示词由系列规则库自动生成（重做说明会并入）；401/403 会熔断批次、429 走技术重试、超时按结果未知保守持账。
+            密钥只保存在本机，不进入页面日志；也可用环境变量 WORKBENCH_IMAGE_API_KEY 覆盖。
+          </div>
+        </div>
+
+        <!-- 系列规则 -->
+        <div class="wb-card p-5">
+          <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-inkTitle">系列规则与规划模板版本 (Leader / Admin)</h3>
+              <p class="text-xs text-inkMuted mt-0.5">保存后生成新模板版本；仅影响后续规划，已创建设计继续冻结在原版本。</p>
+            </div>
+            <div class="w-44 shrink-0">
+              <select id="series-rule-select" aria-label="选择系列规则">
+                <option value="modern_business">现代商务</option>
+                <option value="natural_wood">自然木质</option>
+                <option value="soft_contemporary">柔和当代</option>
+              </select>
+            </div>
+          </div>
+          <textarea id="series-rule-json" aria-label="系列规则 JSON" rows="9" class="wb-input font-mono leading-relaxed"></textarea>
+          <div class="flex items-center justify-between mt-2 gap-3 flex-wrap">
+            <span id="series-template-version" class="text-[11px] text-inkMuted">模板版本加载中</span>
+            <button id="btn-save-series-rule" class="wb-btn wb-btn-dark">保存规则修订</button>
+          </div>
+          <div class="mt-3 pt-3 border-t border-lineLight">
+            <div class="flex items-end gap-2 flex-wrap mb-3">
+              <div class="flex-1"><label for="ai-style-brief" class="block text-xs mb-1">用一句话创建风格系列</label><input id="ai-style-brief" class="wb-input" placeholder="例如：温暖自然的精品酒店，浅木与亚麻"></div>
+              <button id="btn-ai-generate-series" class="wb-btn wb-btn-dark">AI 生成新系列</button>
+            </div>
+            <div class="flex items-end gap-2 flex-wrap">
+              <div class="flex-1 min-w-[10rem]">
+                <label class="block text-[11px] text-inkBody mb-1.5">新系列英文标识</label>
+                <input type="text" id="new-series-id" aria-label="新系列英文标识" placeholder="如 luxury_wood（小写字母开头）" class="wb-input">
+              </div>
+              <div class="flex-1 min-w-[10rem]">
+                <label class="block text-[11px] text-inkBody mb-1.5">新系列中文名</label>
+                <input type="text" id="new-series-name" aria-label="新系列中文名" placeholder="如 轻奢木质" class="wb-input">
+              </div>
+              <button id="btn-add-series" class="wb-btn wb-btn-grad shrink-0">+ 新增系列</button>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-1.5">新增系列默认沿用内置规则模板，编辑上方 JSON 后点"保存规则修订"即可定制；新系列会出现在创建批次的可选系列里。</p>
+          </div>
+        </div>
+
+        <!-- 结果未知处置中心 -->
+        <div class="wb-card p-5">
+          <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-inkTitle flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-violet-500"></span>
+                结果未知 (unknown_pending_confirmation) 处置中心
+              </h3>
+              <p class="text-xs text-inkMuted mt-0.5">发生超时或断网的任务保守计入预算，禁止自动重发；由负责人核查后确认成功或释放额度。</p>
+            </div>
+            <button id="btn-refresh-unknown" class="text-xs text-primary-600 hover:text-primary-700 hover:underline shrink-0">刷新未知列表</button>
+          </div>
+          <div id="unknown-tasks-container" class="space-y-2 text-xs">
+            <div class="text-slate-400 py-3 text-center">暂无结果未知任务</div>
+          </div>
+          <div id="rule-snapshot-status" class="mt-3 p-2.5 rounded-xl border border-lineLight bg-slate-50/60 text-inkMuted text-[11px]"></div>
+        </div>
+
+        <!-- 水印配置 + 清理保护 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div class="wb-card p-5 space-y-3">
+            <h3 class="text-sm font-bold text-inkTitle">水印参数配置 (Leader / Admin)</h3>
+            <div class="space-y-2.5 text-xs">
+              <div>
+                <label class="block text-inkBody font-medium mb-1.5" for="cfg-main-wm">主品牌水印文本</label>
+                <input type="text" id="cfg-main-wm" aria-label="主品牌水印文本" class="wb-input">
+              </div>
+              <div>
+                <label class="block text-inkBody font-medium mb-1.5" for="cfg-repeat-wm">平铺轻量防盗文本</label>
+                <input type="text" id="cfg-repeat-wm" aria-label="平铺轻量防盗文本" class="wb-input">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-inkBody font-medium mb-1.5" for="cfg-opacity-wm">透明度 (0.05-0.9)</label>
+                  <input type="number" id="cfg-opacity-wm" aria-label="水印透明度" step="0.05" min="0.05" max="0.9" class="wb-input">
+                </div>
+                <div>
+                  <label class="block text-inkBody font-medium mb-1.5" for="cfg-pos-wm">位置</label>
+                  <div class="w-full">
+                    <select id="cfg-pos-wm" aria-label="水印位置" class="w-full">
+                      <option value="bottom_right">右下角</option>
+                      <option value="center">居中</option>
+                      <option value="bottom_left">左下角</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <button id="btn-save-watermark" class="wb-btn wb-btn-dark w-full">保存水印配置</button>
+            </div>
+          </div>
+
+          <div class="wb-card p-5 space-y-3">
+            <h3 class="text-sm font-bold text-inkTitle">30 天清理保护机制 (Admin 专属)</h3>
+            <p class="text-xs text-inkMuted leading-relaxed">
+              执行历史清理，严格保护：所有已归档版本、当前使用版本、被依赖全景版本，绝不删除；仅清理历史废弃的失败/淘汰孤立版本。
+            </p>
+            <div class="bg-amber-50 p-3 rounded-xl border border-amber-100 text-amber-800 text-xs">
+              <div class="font-semibold">清理保护守则:</div>
+              <ul class="list-disc pl-4 mt-1 space-y-0.5">
+                <li>归档成果强保留</li>
+                <li>当前槽位锁定版本强保留</li>
+                <li>被下游关联的全景版本强保留</li>
+              </ul>
+            </div>
+            <button id="btn-run-cleanup" class="wb-btn wb-btn-danger w-full">执行受保护清理 (Admin)</button>
+          </div>
+        </div>
+
+        <!-- 审计日志 -->
+        <div class="wb-card p-5">
+          <h3 class="text-sm font-bold text-inkTitle mb-2">批次审计操作日志</h3>
+          <div id="audit-log-container" class="max-h-60 overflow-y-auto custom-scrollbar space-y-1 text-xs text-inkMuted">
+            <!-- 动态渲染日志 -->
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </main>
+
+  <!-- 重做弹窗 Modal -->
+  <div id="modal-redo" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="wb-card max-w-md w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar">
+      <div class="flex items-center justify-between gap-3 pb-3 border-b border-lineLight">
+        <h3 id="modal-redo-title" class="font-bold text-sm text-inkTitle">发起图片重做</h3>
+        <button id="btn-close-redo" aria-label="关闭重做弹窗" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-inkBody font-semibold mb-1.5" for="redo-reason-category">标准化原因分类 <span class="text-rose-500">*</span></label>
+          <div class="w-full">
+            <select id="redo-reason-category" aria-label="重做标准化原因分类" class="w-full">
+              <option value="结构错误">结构错误 (家具拼接异常或违背物理现实)</option>
+              <option value="家具变形">家具变形 (线条扭曲、边角拉伸失真)</option>
+              <option value="比例异常">比例异常 (床屏过高、床头柜过小等比例失调)</option>
+              <option value="构图不符">构图不符 (未按槽位要求展示重点区域)</option>
+              <option value="风格不符">风格不符 (越出产品系列材质或色彩规则)</option>
+              <option value="相似度过高">相似度过高 (与已有历史方案雷同)</option>
+              <option value="主观审美不合格">主观审美不合格 (光影质感或高级感欠缺)</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-inkBody font-semibold mb-1.5" for="redo-comment">详细说明</label>
+          <textarea id="redo-comment" aria-label="重做详细说明" rows="3" class="wb-input" placeholder="填写具体的改动指导建议..."></textarea>
+        </div>
+        <div id="redo-override-box" class="hidden p-2.5 bg-amber-50 border border-amber-100 rounded-xl">
+          <label class="flex items-center gap-2 text-amber-800 font-medium cursor-pointer">
+            <input type="checkbox" id="redo-leader-override" aria-label="负责人特批继续重做" class="accent-blue-600">
+            <span>负责人特批：已超出常规重做限制，明确特批继续重做</span>
+          </label>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button id="btn-cancel-redo" class="wb-btn wb-btn-ghost">取消</button>
+        <button id="btn-submit-redo" class="wb-btn wb-btn-grad">确认重做</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新建批次弹窗 Modal -->
+  <div id="modal-batch" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="wb-card max-w-lg w-full p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto custom-scrollbar">
+      <div class="flex items-center justify-between gap-3 pb-3 border-b border-lineLight">
+        <h3 class="font-bold text-sm text-inkTitle">配置并创建新生产批次</h3>
+        <button id="btn-close-batch-modal" aria-label="关闭新建批次弹窗" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-name">批次名称</label>
+          <input type="text" id="new-batch-name" aria-label="批次名称" class="wb-input" value="2026Q4 酒店定制首轮规划小样">
+        </div>
+        <div>
+          <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-target">目标归档组数</label>
+          <input type="number" id="new-batch-target" aria-label="目标归档组数" required class="wb-input" placeholder="请输入目标组数" min="1" max="50">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-warning">预警线 (次)</label>
+            <input type="number" id="new-batch-warning" aria-label="预算预警线" required class="wb-input" placeholder="必须显式填写">
+          </div>
+          <div>
+            <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-hardlimit">硬上限 (次)</label>
+            <input type="number" id="new-batch-hardlimit" aria-label="预算硬上限" required class="wb-input" placeholder="必须显式填写">
+          </div>
+        </div>
+        <div id="budget-hint" class="p-2.5 rounded-xl border border-lineLight bg-slate-50/60 text-[11px] text-inkMuted leading-relaxed">
+          勾选产品系列后，这里会显示本次批次的生图次数估算与建议预算。
+        </div>
+        <div>
+          <label class="block text-inkBody font-semibold mb-1.5">启用产品系列</label>
+          <div id="series-check-container" class="mt-1 space-y-1.5">
+            <div class="text-inkMuted">系列列表加载中...</div>
+          </div>
+        </div>
+        <div><label for="new-batch-brief" class="block text-inkBody font-semibold mb-1.5">风格偏好与禁忌</label><textarea id="new-batch-brief" class="wb-input" rows="3" placeholder="例如：深色木纹，温暖商务氛围，避免雕花"></textarea></div>
+        <div class="p-2.5 bg-blue-50 border border-blue-100 rounded-xl text-blue-700 text-xs">
+          创建后先规划并确认正式款和候补款，不会自动生图。
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button id="btn-cancel-new-batch" class="wb-btn wb-btn-ghost">取消</button>
+        <button id="btn-submit-new-batch" class="wb-btn wb-btn-grad">创建并进入方案规划</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 提示 -->
+  <div id="toast" class="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-full shadow-xl text-xs font-medium transition-all duration-300 translate-y-2 opacity-0 pointer-events-none flex items-center gap-2">
+    <span id="toast-text">提示信息</span>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/smart-planning.js"></script>
+</body>
+</html>

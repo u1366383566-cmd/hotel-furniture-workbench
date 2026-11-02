@@ -1,0 +1,40 @@
+# systemd 服务模板
+# 安装: sudo cp workbench.service /etc/systemd/system/hotel-furniture-workbench.service
+#       sudo systemctl daemon-reload && sudo systemctl enable --now hotel-furniture-workbench
+# 说明: 服务只绑定 127.0.0.1，对外一律经 nginx 反代；密钥经 EnvironmentFile 注入。
+
+[Unit]
+Description=Hotel Furniture Workbench (酒店家具智能套图工作台)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbench
+Group=workbench
+WorkingDirectory=/opt/hotel-furniture-workbench/current
+EnvironmentFile=/etc/hotel-furniture-workbench/env
+# 生产模式：身份只能由可信认证层注入，后端拒绝缺失身份的请求
+Environment=WORKBENCH_AUTH_MODE=trusted_proxy
+ExecStart=/opt/hotel-furniture-workbench/venv/bin/python -m uvicorn backend.app.main:app \
+    --host 127.0.0.1 --port 8021 --workers 1 --log-level info
+Restart=on-failure
+RestartSec=5
+
+# 数据与存储目录（计划：数据库为真实任务账本，必须持久化且备份）
+# WORKBENCH_STORAGE_DIR 指向的数据目录权限 0750 workbench:workbench
+
+# 加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/hotel-furniture-workbench
+
+# 日志策略：journald 收集，按计划不落业务明文密钥；保留 14 天
+StandardOutput=append:/var/lib/hotel-furniture-workbench/logs/service.log
+StandardError=append:/var/lib/hotel-furniture-workbench/logs/service.err.log
+LogLevelMax=info
+
+[Install]
+WantedBy=multi-user.target
