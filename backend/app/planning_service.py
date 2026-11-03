@@ -93,25 +93,23 @@ _SLOT_OBJECTIVES = {
     "panorama": "酒店客房场景全景实拍图：完整呈现家具组合与空间关系，比例真实、透视自然",
     "white_isolated": "纯白背景整套家具重组展示图：家具分立摆放、立体透视平铺，可重新组合与调整朝向",
     "twin_bed": "同系列双床配置白底展示图：两张单人床对称布局，保持原款材料与设计语言，床宽与床屏分段做必要适配",
-    "nightstand_closeup": "床头区域白底中近景特写：聚焦床头柜、床屏与床头局部结构，带少量床体",
+    "nightstand_closeup": "白底家具细节展板：左右并排展示两处床及床屏等局部特写",
 }
 
+_PANORAMA_ANCHOR = (
+    "所有家具为同一系列定制家具，严格遵循系列规则的设计语言（床屏轮廓造型、板材分缝、饰面材质、五金款式、体量感与软包工艺），禁止引入规则之外的造型元素（雕花、异形装饰线条、多余金属装饰、撞色软包）；墙面、地面、天花保持低调素色基底，无装饰画、地毯花纹与多余摆件，视觉重心只留给家具；整体氛围由家具系列的材质与工艺自然呈现。"
+)
 
-def _white_isolated_layout(companion: list) -> str:
-    """白底清单图的固定三行版式（对照用户确认的布局模板）；
-    家具项从系列规则 companion_items 动态填充。"""
-    def pick(i, default):
-        return companion[i] if i < len(companion) else default
 
+def _panorama_coverage_line(structured_spec: Dict[str, Any]) -> Optional[str]:
+    """全景家具覆盖清单：逐件点名方案配套家具，防止生图遗漏或被遮挡。"""
+    companion = [str(c).strip() for c in (structured_spec.get("companion_items") or []) if str(c).strip()]
+    if not companion:
+        return None
     return (
-        "布局（严格遵循以下三行版式，从上到下，行高比例约为 45% / 30% / 25%）：\n"
-        "第一行（画面上半，家具尺寸最大）：左侧为全套大床组——床（床屏+床体+床品，正面微俯视角）"
-        f"、左右各一个床头柜（含台灯）{('；' + pick(5, '床尾凳搭搭毯')) if True else ''}；"
-        f"中部为{pick(0, '转角沙发配圆茶几')}；右侧为{pick(1, '单人扶手椅')}。\n"
-        f"第二行（画面居中，尺寸中等）：左侧为{pick(3, '电视柜（含壁挂电视与装饰背板）')}；"
-        f"中部为{pick(2, '书桌配座椅与台灯')}；右侧为{pick(1, '单人扶手椅配小圆边几')}。\n"
-        f"第三行（画面下方，尺寸较小）：从左到右依次为双门衣柜、{pick(4, '金属行李架（挂浴袍）')}、"
-        f"{pick(5, '布艺长凳')}、{pick(6, '落地灯')}。"
+        "家具覆盖要求：画面必须把方案家具逐件完整呈现——床屏、床体、左右两只床头柜必须全部可见，"
+        "配套家具的每一件也必须出现且可辨认：" + "；".join(companion) +
+        "。任何一件都不得省略或被完全遮挡；空间不足时宁可缩小家具占比、拉开镜头，也不得删减家具种类。"
     )
 
 
@@ -136,45 +134,37 @@ def build_real_generation_prompt(
     if has_reference_image:
         # ---- 以图生图提示词（下游三图）：视觉锚点 = 参考全景 ----
         if slot_type == "white_isolated":
-            companion = structured_spec.get("companion_items") or []
             lines = [
-                "任务：制作一张【酒店客房家具套装清单图】——把参考图房间里的家具逐件提取，在纯白背景上按固定三行版式陈列，"
-                "作为参考图场景的「家具拆解说明书」，让看图人能把清单里的每一件与参考图场景一一对应。",
-                "硬性要求（最高优先级）：背景纯净纯白色 #FFFFFF；每件家具独立完整呈现、互不遮挡；"
-                "无窗帘/地毯/地板/墙面/窗户/吊灯/挂画/绿植等任何环境元素。",
-                _white_isolated_layout(companion),
-                "所有家具保留参考图中的材质、颜色与设计语言，不得更换款式；全部正面微俯视角，彼此留白间距，风格如家具产品目录的全套一览页。",
+                "参考输入图片中的家具，分析并提取其中的产品设计特征，以原图家具为设计依据，重新创作一张高端酒店家具整套组合白底展示图。",
+                "版式是家具产品目录式的多行分区排版，整张正方形画面只展示一套家具，不能保持原房间的透视和空间位置。将产品分组独立陈列，每组之间有明显白色间隔，不能相互遮挡或连接成一个房间。",
+                "将参考全景中可辨认的全部家具逐件提取，按照数量灵活分成两至三行：床及床屏组合可作为较大的主视觉，其余家具独立分组均衡陈列。只展示参考图中实际出现且可辨认的家具，不凭空添加、重复或重新设计家具；未出现的家具无需补齐，缺少的位置自然留白。",
+                "整个画面像家具目录的组合陈列，不画分格线、边框或文字；各组在同一白底上按行错落排列，彼此分离。每件家具包括柜体、桌脚、床尾均须完整入镜，四周留有足够空白，不要被画面边缘裁切。",
+                "忠实保留参考图中家具的款式、造型、结构、比例、材质、木纹、软包、颜色及装饰细节。重新排列不等于重新设计，不得擅自修改原有产品外观；局部被遮挡的结构只做必要的合理补全。",
+                "产品以合理的三分之四视角展示，床组最大，其他组按版面适当缩小以完整展示；不同产品组分别投下轻微接触阴影，家具之间保持清晰间距。床屏仅保留产品本身的完整背板，不保留房间整面墙。",
+                "呈现真实的商业家具摄影质感。准确表现木材纹理、布艺肌理、软包形态、皮革质感、金属反射及石材纹理。采用柔和均匀的摄影棚光照，家具底部具有自然的浅灰色接触阴影，体现真实的体积感与落地感。避免过度光滑、塑料质感、结构变形及不合理的透视关系。",
+                "最终生成的是一张重新设计布局的酒店家具组合产品图，而不是原始场景的背景移除版本。纯白无缝背景，无室内环境，无文字，无品牌标识，无水印。",
             ]
         elif slot_type == "twin_bed":
-            companion = structured_spec.get("companion_items") or []
-            sofa_item = companion[0] if companion else "简约沙发配茶几"
             lines = [
-                "以参考图片中的家具为设计依据，生成一张高端酒店双床房家具系列白底产品展示图。",
-                "保留参考图中所有家具原有的外观、款式、结构、比例、材质、颜色、木纹及细节，不随意修改产品设计。",
-                "画面以两张单人床为核心，每张床配各自独立的完整床屏背板——两块背板彼此分开、中间留出明显间隔，"
-                "严禁连接成一整块通长背板，严禁共用床屏。",
-                f"搭配{sofa_item}及独立式衣架，其设计需与参考图的整体风格协调，不添加衣柜。",
-                "重新组织家具的朝向、间距与前后关系，突出双床配置与独立背板产品，整体构图有层次、留白充足、产品完整。",
-                "纯白无缝背景，真实材质与自然接触阴影，无室内环境、无人物、无文字、无标识、无水印。",
+                "以参考白底家具展板为唯一产品和风格依据，生成同系列酒店双床选配方案白底产品展板。将参考图中的一张大床适配为两张独立单人床，必须恰好两张，并列摆放；保留原床的造型语言、床体结构、软包、材质、木纹、配色和细节，仅对床宽与必要结构做适配。床屏可采用一体式或分段式，风格必须与原床屏一致；双床之间与外侧按需配置与原床头柜同款的床头柜，双床不配床尾凳。",
+                "下方选配套件的排版必须与参考展板明显不同：禁止照搬参考展板中的全部家具，仅从其中精选三组代表性单品交叉组合展示，例如电视柜组合、书桌配书椅组合、沙发配圆茶几组合；务必省略衣柜与床尾凳等大件，也不新增参考展板中不存在的家具。三组配件松弛错落摆放在双床下方，间距开阔、留白充足，突出模块化选配与空间灵活性。",
+                "与参考展板保持一致的45°斜鸟瞰视角、写实商业家具摄影、纯白无缝背景和柔和均匀影棚光，保留轻微自然接触阴影。无墙体、窗户、人物、文字、标识和水印。",
             ]
         elif slot_type == "nightstand_closeup":
-            headboard_desc = structured_spec.get("headboard", "软包床屏")
             lines = [
-                f"以参考图片中的床、床头柜及{headboard_desc}为设计主体，严格保留原有家具的造型、结构、比例、材质、纹理、配色及细节，不进行任何重新设计。",
-                "采用纯白无缝背景的商业产品摄影形式，不出现任何室内场景、墙面环境或装饰背景。",
-                "镜头聚焦床头区域，采用45°侧前方中近景构图，仅展示床头柜、床屏及少量床体边缘，不拍摄床尾，不展示完整床体，不出现大面积床面。",
-                f"重点呈现床头柜的柜体造型与细节、床屏的分块、包边、缝线及材质纹理，以及床、床头柜与床屏之间的组合关系。",
-                "家具自然摆放于纯白背景中，轮廓清晰，比例真实，柔和均匀的摄影棚光线，保留轻微自然接触阴影，避免悬浮感与过度修饰。",
-                "画面简洁、高端、真实，8K超写实商业家具摄影，无其他家具、无场景布置、无人物、无文字、无标识、无水印。",
+                "以参考白底展板中的床及床屏等家具为唯一设计依据，制作一张家具局部细节展示图。画面左右并排展示两处不同的局部特写，左右等分、大小一致，仅展示局部，不展示完整家具。",
+                "选择参考图中实际存在的床屏软包、床体、床头柜或连接细节，清晰表现木饰面纹理、布艺肌理、包边缝线、板材分缝及实际存在的五金；严格保持原有造型、材质和颜色，不虚构不存在的细节。",
+                "纯白背景、柔和均匀的影棚布光、轻微自然阴影，写实商业家具摄影，细节清晰；无房间环境、人物、文字、标识、水印及多余杂物。",
             ]
         else:
             lines = [
                 f"任务：基于参考图生成{_SLOT_OBJECTIVES.get(slot_type, '产品展示图')}，纯白背景，移除一切环境元素。",
             ]
-        if materials:
-            lines.append(f"材质（与参考图保持一致）：{'、'.join(materials)}")
-        if colors:
-            lines.append(f"配色（与参考图保持一致）：{'、'.join(colors)}")
+        if slot_type not in ("white_isolated", "twin_bed"):
+            if materials:
+                lines.append(f"材质（与参考图保持一致）：{'、'.join(materials)}")
+            if colors:
+                lines.append(f"配色（与参考图保持一致）：{'、'.join(colors)}")
         lines.append("构图要求：正方形 1:1，写实商业产品摄影质感，均匀柔和的影棚布光，轻微投影。")
     else:
         # ---- 文生图提示词（全景）----
@@ -183,9 +173,13 @@ def build_real_generation_prompt(
             reason = meta.get('redo_reason_category')
             if reason:
                 custom += '\n本次重做需修正：' + str(reason) + ' ' + str(meta.get('detail_comment') or '')
-            return custom + '\n画面中不得出现任何文字、水印、LOGO 或人物。'
+            coverage = _panorama_coverage_line(structured_spec)
+            out = custom + '\n' + _PANORAMA_ANCHOR
+            if coverage:
+                out += '\n' + coverage
+            return out + '\n家具须作为统一系列完整呈现：让方案中的床、床屏、床头柜及配套家具在画面内尽可能完整、清晰可辨，避免被画面边缘裁切或大面积遮挡，以便后续提取为白底产品展板。\n构图要求：正方形 1:1，画面中不得出现任何文字、水印、LOGO 或人物。'
         lines = [f"为酒店家具定制方案「{design_code}」生成{_SLOT_OBJECTIVES.get(slot_type, ' Approved hotel furniture visual.')}",
-                 "构图要求：正方形 1:1，写实商业摄影质感，柔和均匀布光，高级酒店样板间水准。"]
+                 "构图要求：正方形 1:1，写实商业摄影质感，柔和均匀布光，高级酒店样板间水准。方案内家具尽可能完整清晰可辨，避免裁切和遮挡，以便后续提取产品。"]
 
         furniture = (
             f"家具组合：床屏={structured_spec.get('headboard', '')}；"
@@ -210,13 +204,13 @@ def build_real_generation_prompt(
             lines.append(f"金属使用范围：{structured_spec['metal_usage']}")
         if structured_spec.get("hotel_mood"):
             lines.append(f"空间气质：{structured_spec['hotel_mood']}")
+        if slot_type == "panorama":
+            lines.append(_PANORAMA_ANCHOR)
+            coverage = _panorama_coverage_line(structured_spec)
+            if coverage:
+                lines.append(coverage)
 
-    if slot_type == "twin_bed" and structured_spec.get("twin_adapter_rule") and has_reference_image:
-        lines.append(f"系列适配参考：{structured_spec['twin_adapter_rule']}")
-    elif slot_type == "white_isolated" and structured_spec.get("white_bg_rule") and has_reference_image:
-        lines.append(f"白底重组参考：{structured_spec['white_bg_rule']}")
-
-    if forbidden or processes:
+    if (forbidden or processes) and not (has_reference_image and slot_type in ("white_isolated", "twin_bed")):
         lines.append(f"禁止出现：{'、'.join(forbidden)}；禁止工艺：{'、'.join(processes)}")
 
     reason = meta.get("redo_reason_category")

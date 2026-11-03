@@ -4,8 +4,12 @@ import sqlite3
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from ..database import get_db
-from ..config import DEFAULT_WATERMARK, DEFAULT_HARD_LIMIT_BUDGET
+from ..config import (
+    DEFAULT_WATERMARK, DEFAULT_WARNING_BUDGET, DEFAULT_HARD_LIMIT_BUDGET,
+    DEFAULT_WARNING_PER_GROUP, DEFAULT_HARD_LIMIT_PER_GROUP,
+)
 from ..models import BatchCreateRequest, BatchResponse, BudgetSummary
+from ..watermark_service import ensure_watermark_config_schema
 from ..security import UserContext, get_current_user, require_roles
 from ..budget_service import get_batch_budget_summary, reserve_budget
 from ..series_rules_service import get_configured_series_rules
@@ -14,6 +18,35 @@ from ..budget_service import BudgetHardLimitExceededError, BudgetWarningExceeded
 from .designs import _maybe_wake_standby_design
 
 router = APIRouter(prefix="/api/batches", tags=["Batches"])
+
+
+def _series_inputs(req: BatchCreateRequest, series_ids: List[str]) -> tuple[Dict[str, Dict[str, int]], Dict[str, str]]:
+    """Normalize per-series counts/preferences without changing legacy payloads."""
+    raw_counts = req.series_counts or {}
+    preferences = {str(k): str(v).strip() for k, v in (req.preferences or {}).items() if str(v).strip()}
+    preferences.update({str(k): str(v).strip() for k, v in (req.series_preferences or {}).items() if str(v).strip()})
+    counts: Dict[str, Dict[str, int]] = {}
+    for sid in series_ids:
+        raw = raw_counts.get(sid) or {}
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail=f"系列 {sid} 的数量配置格式无效")
+        try:
+            primary = int(raw.get("primary", req.designs_per_series))
+            standby = int(raw.get("standby", req.standby_designs_per_series))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"系列 {sid} 的数量必须为整数") from exc
+        if "preference" in raw and str(raw.get("preference") or "").strip():
+            preferences[sid] = str(raw["preference"]).strip()[:2000]
+        counts[sid] = {"primary": primary, "standby": standby}
+    return counts, preferences
+
+
+def _apply_series_preference(spec: Dict[str, Any], preferences: Dict[str, str], series_id: str) -> Dict[str, Any]:
+    preference = (preferences.get(series_id) or "").strip()
+    if preference:
+        spec["series_preference"] = preference
+    return spec
+
 
 def _generate_design_spec(
     series_id: str,
@@ -82,8 +115,11 @@ def create_batch(
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     batch_id = f"batch_{uuid.uuid4().hex[:8]}"
-    if user.role == 'operator' and not req.auto_workflow:
-        raise HTTPException(status_code=403, detail='普通用户只能创建自动规划任务')
+    if user.is_operator and not req.auto_workflow:
+        raise HTTPException(status_code=403, detail='美工只能创建自动规划任务')
+
+    # Automatic tasks own their quota calculation.  Never let a client lower
+    # the server defaults by sending explicit budget fields.
     if req.auto_workflow:
         if not req.smart_planning or req.auto_start_panorama or any(c.get('standby', 0) for c in req.series_counts.values()):
             raise HTTPException(status_code=400, detail='自动任务应使用智能规划且不预设候补')
@@ -91,8 +127,17 @@ def create_batch(
             raise HTTPException(status_code=400, detail='各系列组数之和必须等于任务目标')
         with get_db() as settings_conn:
             settings = settings_conn.execute("SELECT warning_per_group, hard_limit_per_group FROM workbench_settings WHERE id='default'").fetchone()
-        req = req.model_copy(update={'warning_budget': req.target_archived_count * settings['warning_per_group'],
-                                     'hard_limit_budget': req.target_archived_count * settings['hard_limit_per_group']})
+        req = req.model_copy(update={
+            'warning_budget': req.target_archived_count * (settings['warning_per_group'] or DEFAULT_WARNING_PER_GROUP),
+            'hard_limit_budget': req.target_archived_count * (settings['hard_limit_per_group'] or DEFAULT_HARD_LIMIT_PER_GROUP),
+        })
+    else:
+        # Explicit legacy/manual callers retain their supplied quota, while a
+        # missing value gets the historical small-sample defaults.
+        req = req.model_copy(update={
+            'warning_budget': req.warning_budget or DEFAULT_WARNING_BUDGET,
+            'hard_limit_budget': req.hard_limit_budget or DEFAULT_HARD_LIMIT_BUDGET,
+        })
     if req.target_archived_count >= 10 and req.hard_limit_budget <= DEFAULT_HARD_LIMIT_BUDGET:
         raise HTTPException(
             status_code=400,
@@ -103,15 +148,18 @@ def create_batch(
     deduped_series = list(dict.fromkeys(req.enabled_series))
     if len(deduped_series) != len(req.enabled_series):
         raise HTTPException(status_code=400, detail="启用系列存在重复项，请去重后提交")
+    series_counts, series_preferences = _series_inputs(req, deduped_series)
+    if req.auto_workflow and sum(c["primary"] for c in series_counts.values()) != req.target_archived_count:
+        raise HTTPException(status_code=400, detail="各系列正式款组数之和必须等于任务目标")
     if req.smart_planning:
         if req.auto_start_panorama:
             raise HTTPException(status_code=400, detail="智能规划必须先审核方案，不能自动派图")
-        if set(req.series_counts) != set(deduped_series):
+        if set(series_counts) != set(deduped_series):
             raise HTTPException(status_code=400, detail="请为每个已选系列设置数量")
-        for counts in req.series_counts.values():
-            if set(counts) != {"primary", "standby"} or not (1 <= counts["primary"] <= 30 and 0 <= counts["standby"] <= 30):
+        for counts in series_counts.values():
+            if not (1 <= counts["primary"] <= 30 and 0 <= counts["standby"] <= 30):
                 raise HTTPException(status_code=400, detail="每系列正式款须为 1–30，候补款须为 0–30")
-        if sum(c['primary'] + c['standby'] for c in req.series_counts.values()) > 60:
+        if sum(c['primary'] + c['standby'] for c in series_counts.values()) > 60:
             raise HTTPException(status_code=400, detail="单批正式款及候补合计最多 60 款")
 
     with get_db(immediate=True) as conn:
@@ -126,12 +174,15 @@ def create_batch(
             INSERT INTO batches (
                 id, name, enabled_series, target_archived_count, current_archived_count,
                 status, is_mock, warning_budget, hard_limit_budget, trial_run_remaining,
-                approved_series_rules_json, approved_rule_snapshot_status, pause_reason
-            ) VALUES (?, ?, ?, ?, 0, ?, 1, ?, ?, 0, ?, 'approved_frozen', ?)
+                approved_series_rules_json, approved_rule_snapshot_status, series_counts_json,
+                series_preferences_json, pause_reason
+            ) VALUES (?, ?, ?, ?, 0, ?, 1, ?, ?, 0, ?, 'approved_frozen', ?, ?, ?)
         """, (
             batch_id, req.name, json.dumps(req.enabled_series), req.target_archived_count,
             initial_status, req.warning_budget, req.hard_limit_budget,
-            json.dumps(approved_snapshot, ensure_ascii=False), initial_pause
+            json.dumps(approved_snapshot, ensure_ascii=False),
+            json.dumps(series_counts, ensure_ascii=False),
+            json.dumps(series_preferences, ensure_ascii=False), initial_pause
         ))
         if req.smart_planning:
             conn.execute("UPDATE batches SET smart_planning = 1, planning_brief = ?, pause_reason = 'PLANNING_REQUIRED' WHERE id = ?",
@@ -141,13 +192,16 @@ def create_batch(
 
         conn.execute("""
             INSERT INTO watermark_configs (
-                id, batch_id, main_text, repeat_text, opacity, font_size, position, updated_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, batch_id, main_text, repeat_text, opacity, font_size, position,
+                renderer, logo_asset, logo_width_ratio, logo_left_ratio, logo_top_ratio, updated_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             f"wm_{uuid.uuid4().hex[:8]}", batch_id,
             DEFAULT_WATERMARK["main_text"], DEFAULT_WATERMARK["repeat_text"],
             DEFAULT_WATERMARK["opacity"], DEFAULT_WATERMARK["font_size"],
-            DEFAULT_WATERMARK["position"], user.user_id
+            DEFAULT_WATERMARK["position"], DEFAULT_WATERMARK["renderer"],
+            DEFAULT_WATERMARK["logo_asset"], DEFAULT_WATERMARK["logo_width_ratio"],
+            DEFAULT_WATERMARK["logo_left_ratio"], DEFAULT_WATERMARK["logo_top_ratio"], user.user_id
         ))
 
         prefix_map = {"modern_business": "MB", "natural_wood": "NW", "soft_contemporary": "SC"}
@@ -161,13 +215,16 @@ def create_batch(
             else:
                 custom_count += 1
                 prefix = 'DS' if custom_count == 1 else f'DS{custom_count}'
-            counts = req.series_counts.get(s_id, {})
-            primary_count = counts.get('primary', req.designs_per_series)
-            standby_count = counts.get('standby', req.standby_designs_per_series)
+            counts = series_counts[s_id]
+            primary_count = counts['primary']
+            standby_count = counts['standby']
             for i in range(primary_count):
                 d_id = f"des_{uuid.uuid4().hex[:8]}"
                 code = f"{prefix}-{i+1:02d}"
-                spec = _generate_design_spec(s_id, i, configured_rules, is_standby=False)
+                spec = _apply_series_preference(
+                    _generate_design_spec(s_id, i, configured_rules, is_standby=False),
+                    series_preferences, s_id,
+                )
                 
                 conn.execute("""
                     INSERT INTO designs (
@@ -200,7 +257,10 @@ def create_batch(
                 d_id = f"des_{uuid.uuid4().hex[:8]}"
                 idx = primary_count + j
                 code = f"{prefix}-STBY-{j+1:02d}"
-                spec = _generate_design_spec(s_id, idx, configured_rules, is_standby=True)
+                spec = _apply_series_preference(
+                    _generate_design_spec(s_id, idx, configured_rules, is_standby=True),
+                    series_preferences, s_id,
+                )
                 
                 conn.execute("""
                     INSERT INTO designs (
@@ -265,6 +325,8 @@ def list_batches(user: UserContext = Depends(require_roles(["operator", "leader"
                 approved_rule_snapshot_status=r["approved_rule_snapshot_status"],
                 smart_planning=bool(r["smart_planning"]), planning_confirmed=bool(r["planning_confirmed"]),
                 auto_workflow=bool(r["auto_workflow"]),
+                series_counts=json.loads(r["series_counts_json"] or "{}"),
+                series_preferences=json.loads(r["series_preferences_json"] or "{}"),
                 created_at=r["created_at"],
                 updated_at=r["updated_at"]
             ))
@@ -297,6 +359,8 @@ def get_batch_by_id(batch_id: str, user: UserContext = Depends(require_roles(["o
             approved_rule_snapshot_status=r["approved_rule_snapshot_status"],
             smart_planning=bool(r["smart_planning"]), planning_confirmed=bool(r["planning_confirmed"]),
             auto_workflow=bool(r["auto_workflow"]),
+            series_counts=json.loads(r["series_counts_json"] or "{}"),
+            series_preferences=json.loads(r["series_preferences_json"] or "{}"),
             created_at=r["created_at"],
             updated_at=r["updated_at"]
         )

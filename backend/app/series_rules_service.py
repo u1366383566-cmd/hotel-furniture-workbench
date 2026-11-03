@@ -96,6 +96,9 @@ def update_series_rule(
 
     rule = dict(configured[series_id])
     rule.update(rules)
+    missing = [k for k in REQUIRED_SERIES_KEYS if not isinstance(rule.get(k), list) or not rule[k]]
+    if missing:
+        raise ValueError(f"缺少必填规划字段或为空: {missing}")
     rule["id"] = series_id
     # 内置系列名称固定；自定义系列保留其存储名称
     if series_id in SERIES_RULES:

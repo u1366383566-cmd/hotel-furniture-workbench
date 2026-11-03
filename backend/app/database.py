@@ -52,6 +52,14 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('batches', 'planning_confirmed', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'planning_brief', "TEXT NOT NULL DEFAULT ''")
     add_col_if_missing('batches', 'auto_workflow', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('batches', 'series_counts_json', "TEXT NOT NULL DEFAULT '{}'")
+    add_col_if_missing('batches', 'series_preferences_json', "TEXT NOT NULL DEFAULT '{}'")
+    add_col_if_missing('planning_jobs', 'replan_count', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('watermark_configs', 'renderer', "TEXT NOT NULL DEFAULT 'seezo_logo'")
+    add_col_if_missing('watermark_configs', 'logo_asset', "TEXT NOT NULL DEFAULT 'static/seezo-watermark.png'")
+    add_col_if_missing('watermark_configs', 'logo_width_ratio', 'REAL NOT NULL DEFAULT 0.20')
+    add_col_if_missing('watermark_configs', 'logo_left_ratio', 'REAL NOT NULL DEFAULT 0.0')
+    add_col_if_missing('watermark_configs', 'logo_top_ratio', 'REAL NOT NULL DEFAULT 0.02')
     add_col_if_missing('budget_ledger', 'ledger_event_type', 'TEXT')
     add_col_if_missing('designs', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('designs', 'planning_status', "TEXT NOT NULL DEFAULT 'legacy'")
@@ -133,6 +141,8 @@ def init_db():
             circuit_break_reason TEXT,
             approved_series_rules_json TEXT,
             approved_rule_snapshot_status TEXT NOT NULL DEFAULT 'legacy_unfrozen',
+            series_counts_json TEXT NOT NULL DEFAULT '{}',
+            series_preferences_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
@@ -244,7 +254,12 @@ def init_db():
             repeat_text TEXT NOT NULL,
             opacity REAL NOT NULL DEFAULT 0.22,
             font_size INTEGER NOT NULL DEFAULT 36,
-            position TEXT NOT NULL DEFAULT 'bottom_right',
+            position TEXT NOT NULL DEFAULT 'top_left',
+            renderer TEXT NOT NULL DEFAULT 'seezo_logo',
+            logo_asset TEXT NOT NULL DEFAULT 'static/seezo-watermark.png',
+            logo_width_ratio REAL NOT NULL DEFAULT 0.20,
+            logo_left_ratio REAL NOT NULL DEFAULT 0.0,
+            logo_top_ratio REAL NOT NULL DEFAULT 0.02,
             updated_by TEXT NOT NULL DEFAULT 'system',
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             UNIQUE(batch_id)
@@ -306,6 +321,7 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'queued',
             error TEXT,
             attempts INTEGER NOT NULL DEFAULT 0,
+            replan_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );

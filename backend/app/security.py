@@ -3,7 +3,12 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import Header, HTTPException, status
 
-VALID_ROLES = {"operator", "leader", "admin"}
+# ``leader`` is a legacy identity that remains accepted for administrator
+# operations.  It is deliberately kept as the actor role in review/audit rows;
+# authorization capability and audit identity must not be conflated.
+VALID_ROLES = {"operator", "artist", "美工", "leader", "admin"}
+OPERATOR_ROLES = {"operator", "artist", "美工"}
+ADMIN_ROLES = {"admin", "leader"}
 
 # 身份信任模式：
 # - local_sim（默认，本地/第一阶段）：允许通过 X-User-Role/X-User-ID 头模拟角色。
@@ -18,7 +23,7 @@ class UserContext:
 
     @property
     def is_operator(self) -> bool:
-        return self.role == "operator"
+        return self.role in OPERATOR_ROLES
 
     @property
     def is_leader(self) -> bool:
@@ -26,7 +31,13 @@ class UserContext:
 
     @property
     def is_admin(self) -> bool:
-        return self.role in ("admin", "leader")
+        """Administrative capability, including the legacy leader identity."""
+        return self.role in ADMIN_ROLES
+
+    @property
+    def is_system_admin(self) -> bool:
+        """The current system-admin role only; legacy leader stays audit-visible."""
+        return self.role == "admin"
 
 def get_current_user(
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
@@ -51,18 +62,29 @@ def get_current_user(
     if role not in VALID_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"无效的角色身份: {role}，仅允许 operator, leader, admin"
+            detail=f"无效的角色身份: {role}，仅允许 operator/artist、美工、leader 或 admin"
         )
     return UserContext(user_id=user_id or "user", role=role)
 
+def _has_allowed_capability(user: UserContext, allowed_roles: List[str]) -> bool:
+    normalized_allowed = {str(role).lower().strip() for role in allowed_roles}
+    if user.role in normalized_allowed:
+        return True
+    if "operator" in normalized_allowed and user.is_operator:
+        return True
+    # A legacy leader is admin-equivalent for administrative operations,
+    # while the original ``user.role`` is never rewritten for audit rows.
+    return "admin" in normalized_allowed and user.is_admin
+
+
 def require_roles(allowed_roles: List[str]):
-    """要求必须具备指定的角色之一"""
+    """要求必须具备指定的角色之一（支持 operator/artist 美工别名）。"""
     def role_checker(
         x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
         x_user_id: Optional[str] = Header(None, alias="X-User-ID")
     ) -> UserContext:
         user = get_current_user(x_user_role, x_user_id)
-        if user.role not in allowed_roles and not (user.role == 'leader' and 'admin' in allowed_roles):
+        if not _has_allowed_capability(user, allowed_roles):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"权限不足: 当前角色 '{user.role}' 无权执行此操作，需要 {allowed_roles}"

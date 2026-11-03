@@ -76,7 +76,10 @@ def test_planning_confirm_start_retry_and_review(client, monkeypatch):
     edit['prompt_checked'] = True
     assert client.put(f'/api/planning/design/{first}', headers=LEADER, json=edit).status_code == 200
     assert client.put(f'/api/planning/design/{first}', headers=LEADER, json=edit).status_code == 409
-    assert build_real_generation_prompt('panorama', changed, 'TEST').startswith('人工修改后的提示词')
+    prompt = build_real_generation_prompt('panorama', changed, 'TEST')
+    assert prompt.startswith('人工修改后的提示词')
+    assert '正方形 1:1' in prompt
+    assert '禁止引入规则之外的造型元素' in prompt
     assert client.post(f'/api/planning/batch/{batch}/confirm', headers=LEADER, json={'expected_specs': {}}).status_code == 409
     assert confirm(client, batch).status_code == 200
     assert client.post(f'/api/planning/design/{first}/generate', headers=LEADER, json={}).status_code == 409
@@ -153,9 +156,23 @@ def test_confirmed_prompt_is_sent_to_image_adapter(client, monkeypatch):
     monkeypatch.setattr('backend.app.task_worker.generate_image_real', generate)
     assert worker_instance.process_next_task()
     assert calls and calls[0].startswith(proposal()['panorama_prompt'])
+    assert calls[0].index('禁止引入规则之外的造型元素') < calls[0].index('家具须作为统一系列完整呈现')
     with get_db() as conn:
         version = conn.execute('SELECT prompt_metadata FROM slot_versions WHERE design_id=?', (design['id'],)).fetchone()
         assert json.loads(version['prompt_metadata'])['real_prompt'] == calls[0]
+
+
+def test_rule_based_panorama_has_anchor():
+    prompt = build_real_generation_prompt('panorama', {'headboard': '木饰面床屏'}, 'TEST')
+    assert '禁止引入规则之外的造型元素' in prompt
+
+
+def test_panorama_coverage_line_lists_companion_items():
+    spec = {'headboard': '木饰面床屏', 'companion_items': ['深胡桃木行李架', '暖灰色科技皮革床尾凳']}
+    prompt = build_real_generation_prompt('panorama', spec, 'TEST')
+    assert '家具覆盖要求' in prompt
+    assert '左右两只床头柜必须全部可见' in prompt
+    assert '深胡桃木行李架' in prompt and '暖灰色科技皮革床尾凳' in prompt
 
 
 def test_appended_standby_requires_its_own_review(client, monkeypatch):

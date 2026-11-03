@@ -4,7 +4,7 @@ LLM 调用全程 mock，不消耗真实文本额度。覆盖：
 1. 正常链路：LLM 返回（含反代 <escape> 包裹）→ 规则规整 → 系列创建 →
    planning_model 记账 → 审计 → 可直接用于批次规划。
 2. 坏输出：非 JSON / 缺必填字段 → 502 清晰报错，不创建系列。
-3. 权限：operator 403。
+3. 操作员可生成系列规则。
 """
 import json
 import uuid
@@ -51,14 +51,9 @@ def test_ai_generate_series_full_chain(client, monkeypatch):
     }, headers={"X-User-Role": "leader"})
     _mock_llm(monkeypatch, ESCAPED_RESPONSE)
 
-    forbidden = client.post("/api/system/series_rules/generate", json={
-        "style_brief": "日式侘寂，原木与和纸"
-    }, headers={"X-User-Role": "operator"})
-    assert forbidden.status_code == 403
-
     created = client.post("/api/system/series_rules/generate", json={
         "style_brief": "日式侘寂，原木与和纸，晨光静谧"
-    }, headers={"X-User-Role": "leader"})
+    }, headers={"X-User-Role": "operator"})
     assert created.status_code == 200, created.text
     body = created.json()
     assert body["series_id"] == "ai_japandi" and body["rule"]["name"] == "日式侘寂"

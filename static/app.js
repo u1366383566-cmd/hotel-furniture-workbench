@@ -14,6 +14,7 @@ const state = {
   activeTab: 'panorama',
   activeRedoContext: null,
   unknownTasksRequestId: 0,
+  designSignature: '',
 };
 
 // ---------- 基础工具 ----------
@@ -92,14 +93,14 @@ async function handleBudgetGuardError(e, retryFn) {
   }
   const b = state.budget || {};
   const info = `当前已占用 ${b.image_generation_count ?? '?'} 次 | 预警线 ${b.warning_budget ?? '?'} | 硬上限 ${b.hard_limit_budget ?? '?'}（硬上限批准也无法突破）`;
-  if (state.currentRole !== 'leader') {
-    showToast('已暂停：需负责人批准越过预警线。请右上角切换为「负责人」后重试。', true);
+  if (!['leader', 'admin'].includes(state.currentRole)) {
+    showToast('已暂停：需管理员或负责人批准越过预警线。请右上角切换身份后重试。', true);
     return;
   }
-  if (confirm(`${msg}\n\n${info}\n\n是否以负责人身份批准越过预警线，并立即继续本次操作？`)) {
+  if (confirm(`${msg}\n\n${info}\n\n是否以管理员身份批准越过预警线，并立即继续本次操作？`)) {
     try {
       await apiFetch(`/api/batches/${state.currentBatchId}/approve_warning`, { method: 'POST' });
-      showToast('负责人已批准越过预警线，正在继续…');
+      showToast('管理员已批准越过预警线，正在继续…');
       await loadBudget();
       await retryFn();
     } catch (approveErr) {
@@ -235,10 +236,12 @@ function initCustomSelects(root) {
 // ---------- 初始化 ----------
 
 document.addEventListener('DOMContentLoaded', async () => {
+  document.getElementById('admin-budget-panel').appendChild(document.getElementById('admin-budget-metrics'));
   initCustomSelects(document);
   setupRoleSelector();
   setupTabs();
   setupModals();
+  setupAccessibleModals();
   document.getElementById('btn-start-from-plans').addEventListener('click', () => document.getElementById('btn-start-batch').click());
   document.getElementById('btn-text-save').addEventListener('click', async () => {
     try {
@@ -254,6 +257,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   renderSeriesChecks();
   await loadBatches();
+  await refreshWorkbenchInfo();
+  document.getElementById('upstream-quota-refresh').addEventListener('click', loadUpstreamQuota);
+  document.getElementById('style-new').addEventListener('click', () => {
+    document.getElementById('style-editor').classList.remove('hidden');
+    document.getElementById('ai-style-brief').focus();
+  });
+  for (const [id, key, list] of [['style-name','name',false], ['style-description','description',false], ['style-materials','materials',true], ['style-colors','color_palette',true]]) {
+    document.getElementById(id).addEventListener('input', e => {
+      const raw = document.getElementById('series-rule-json');
+      try { const rule = JSON.parse(raw.value); rule[key] = list ? e.target.value.split('\n').map(x => x.trim()).filter(Boolean) : e.target.value; raw.value = JSON.stringify(rule, null, 2); } catch (_) {}
+    });
+  }
+  await loadUpstreamQuota();
+  setInterval(loadUpstreamQuota, 60000);
 
   setInterval(async () => {
     if (state.currentBatchId) {
@@ -270,9 +287,13 @@ function setupRoleSelector() {
     btn.addEventListener('click', () => {
       state.currentRole = btn.dataset.role;
       state.currentUserId = `simulated_${state.currentRole}`;
+      const canManage = state.currentRole === 'admin' || state.currentRole === 'leader';
+      document.querySelector('[data-tab="system"]').classList.toggle('hidden', !canManage);
+      if (!canManage && state.activeTab === 'system') document.querySelector('[data-tab="panorama"]').click();
       btns.forEach(b => b.classList.remove('seg-active'));
       btn.classList.add('seg-active');
-      showToast(`已切换身份为: ${state.currentRole.toUpperCase()}`);
+      const roleLabel = state.currentRole === 'operator' ? '操作员 · 美工' : state.currentRole === 'admin' ? '管理员' : '负责人（兼容）';
+      showToast(`已切换身份为: ${roleLabel}`);
       updateBudgetUI();
       renderCurrentTab();
     });
@@ -301,31 +322,47 @@ function updateBudgetHint() {
   if (!hint) return;
   const seriesCount = document.querySelectorAll('.series-check:checked').length;
   if (!seriesCount) {
-    hint.textContent = '请至少勾选一个产品系列，这里会显示生图次数估算。';
+    hint.textContent = '请选择产品系列并填写每个系列需要的组数。';
     return;
   }
   const panoramas = Array.from(document.querySelectorAll('.series-check:checked')).reduce((n, cb) => n + (Number(cb.parentElement.querySelector('.series-primary').value) || 0), 0);
-  const downstream = 3;                        // 走完 1 组四图闭环需要 3 张下游
-  const minNeed = panoramas + downstream;
-  const suggest = minNeed + 1;                 // +1 次重做余量
-  const warningVal = parseInt(document.getElementById('new-batch-warning').value);
-  const hardVal = parseInt(document.getElementById('new-batch-hardlimit').value);
-  let tone = 'text-inkMuted';
-  let extra = '';
-  if (hardVal && hardVal < minNeed) {
-    tone = 'text-rose-500';
-    extra = ` ⚠ 硬上限 ${hardVal} 低于最小需求 ${minNeed}，流程中途会被硬阻断！`;
-  } else if (warningVal && warningVal < minNeed) {
-    tone = 'text-amber-600';
-    extra = ` ⚠ 预警线 ${warningVal} 低于首发需求，中途会暂停等你批准（可接受，但需人工盯）`;
-  } else if (hardVal && warningVal) {
-    extra = ' ✓ 预算充足';
-  }
-  hint.className = `p-2.5 rounded-xl border border-lineLight bg-slate-50/60 text-[11px] leading-relaxed ${tone}`;
-  hint.innerHTML =
-    `当前勾选 <b>${seriesCount}</b> 个系列 → 确认后首发 <b>${panoramas}</b> 张全景；` +
-    `走完 1 组四图还需 <b>${downstream}</b> 张下游 → 最少 <b>${minNeed}</b> 次，` +
-    `建议预警线 ≥ ${minNeed}、硬上限 ≥ ${suggest}。${extra}`;
+  hint.textContent = `已选择 ${seriesCount} 个系列，共 ${panoramas} 组；系统会自动规划并开始生成全景。`;
+}
+
+function setupAccessibleModals() {
+  const modalIds = ['modal-batch', 'modal-redo'];
+  const focusable = modal => [...modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && !el.closest('.hidden'));
+  const restoreFocus = modal => { if (modal?._returnFocus && document.contains(modal._returnFocus)) modal._returnFocus.focus(); };
+  modalIds.forEach(id => {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.addEventListener('click', event => { if (event.target === modal) { modal.classList.add('hidden'); restoreFocus(modal); } });
+    const observer = new MutationObserver(() => {
+      if (!modal.classList.contains('hidden') && !modal._isOpen) {
+        modal._isOpen = true;
+        modal._returnFocus = document.activeElement;
+        setTimeout(() => focusable(modal)[0]?.focus(), 0);
+      } else if (modal.classList.contains('hidden') && modal._isOpen) {
+        modal._isOpen = false;
+        restoreFocus(modal);
+      }
+    });
+    observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
+  });
+  document.addEventListener('keydown', event => {
+    const openModal = modalIds.map(id => document.getElementById(id)).find(modal => modal && !modal.classList.contains('hidden'));
+    if (!openModal) return;
+    if (event.key === 'Escape') {
+      event.preventDefault(); openModal.classList.add('hidden'); restoreFocus(openModal); return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = focusable(openModal); if (!items.length) return;
+    const first = items[0]; const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
 }
 
 function setupModals() {
@@ -341,10 +378,6 @@ function setupModals() {
     if (e.target.id === 'new-batch-warning' || e.target.id === 'new-batch-hardlimit' || e.target.classList.contains('series-primary')) updateBudgetHint();
   });
   btnNewBatch.addEventListener('click', () => {
-    if (state.currentRole === 'operator') {
-      showToast('只有负责人 (Leader) 或管理员 (Admin) 允许创建生产批次', true);
-      return;
-    }
     modalBatch.classList.remove('hidden');
   });
   document.getElementById('btn-close-batch-modal').addEventListener('click', () => modalBatch.classList.add('hidden'));
@@ -352,25 +385,16 @@ function setupModals() {
 
   document.getElementById('btn-submit-new-batch').addEventListener('click', async () => {
     const name = document.getElementById('new-batch-name').value.trim();
-    const target = parseInt(document.getElementById('new-batch-target').value);
-    const warning = parseInt(document.getElementById('new-batch-warning').value);
-    const hardlimit = parseInt(document.getElementById('new-batch-hardlimit').value);
     const seriesChecks = Array.from(document.querySelectorAll('.series-check:checked')).map(c => c.value);
+    const counts = Object.fromEntries(Array.from(document.querySelectorAll('.series-check:checked')).map(cb => [cb.value, {primary:Number(cb.parentElement.querySelector('.series-primary').value),standby:0}]));
+    const target = Object.values(counts).reduce((sum, c) => sum + c.primary, 0);
 
     if (!name || seriesChecks.length === 0) {
       showToast('请填写批次名称并勾选至少一个系列', true);
       return;
     }
-    if (!target || !warning || !hardlimit) {
-      showToast('目标数、预警线和硬上限都必须由负责人显式填写', true);
-      return;
-    }
-    if (hardlimit <= warning) {
-      showToast('硬上限必须大于预警线', true);
-      return;
-    }
-    if (target >= 10 && hardlimit <= 25) {
-      showToast('日常生产不能套用小样 25 次硬上限，请显式评估更大预算', true);
+    if (!target || target > 50 || Object.values(counts).some(c => !Number.isInteger(c.primary) || c.primary < 1 || c.primary > 30)) {
+      showToast('请填写每个系列的组数，总数不超过 50 组', true);
       return;
     }
 
@@ -381,22 +405,18 @@ function setupModals() {
         target_archived_count: target,
         designs_per_series: 2,
         standby_designs_per_series: 1,
-        warning_budget: warning,
-        hard_limit_budget: hardlimit,
         auto_start_panorama: false,
         smart_planning: true,
+        auto_workflow: true,
         planning_brief: document.getElementById('new-batch-brief').value.trim(),
-        series_counts: Object.fromEntries(Array.from(document.querySelectorAll('.series-check:checked')).map(cb => [cb.value, {
-          primary: Number(cb.parentElement.querySelector('.series-primary').value),
-          standby: Number(cb.parentElement.querySelector('.series-standby').value)
-        }]))
+        series_counts: counts
       };
       const newBatch = await apiFetch('/api/batches', {
         method: 'POST',
         body: JSON.stringify(payload)
       });
       modalBatch.classList.add('hidden');
-      showToast(`成功创建批次: ${newBatch.name}`);
+      showToast(`任务已创建，正在自动规划：${newBatch.name}`);
       await loadBatches(newBatch.id);
     } catch (e) {
       showToast(e.message, true);
@@ -456,6 +476,9 @@ function setupModals() {
   // 批次选择下拉
   document.getElementById('batch-select').addEventListener('change', async (e) => {
     state.currentBatchId = e.target.value;
+    state.budget = null;
+    document.getElementById('task-quota').innerText = '—';
+    document.getElementById('task-quota-status').innerText = '正在获取任务额度';
     await onBatchChanged();
   });
 
@@ -464,7 +487,7 @@ function setupModals() {
     if (!state.currentBatchId) return;
     try {
       await apiFetch(`/api/batches/${state.currentBatchId}/approve_warning`, { method: 'POST' });
-      showToast('负责人已明确特批跨越预警线');
+      showToast('管理员已明确批准跨越预警线');
       await loadBudget();
     } catch (e) {
       showToast(e.message, true);
@@ -589,12 +612,13 @@ function setupModals() {
       });
       showToast(`规则已保存，新模板版本 ${res.rule.template_version}`);
       await loadSeriesRules();
+      await renderSeriesChecks();
     } catch (e) {
       showToast(e.message, true);
     }
   });
 
-  // 负责人自定义新增产品系列（默认沿用内置模板，可继续编辑定制）
+  // 管理员自定义新增产品系列（默认沿用内置模板，可继续编辑定制）
   document.getElementById('btn-add-series').addEventListener('click', async () => {
     const seriesId = document.getElementById('new-series-id').value.trim();
     const name = document.getElementById('new-series-name').value.trim();
@@ -667,10 +691,6 @@ function setupModals() {
       showToast('请先填写风格方向（一句话即可）', true);
       return;
     }
-    if (state.currentRole === 'operator') {
-      showToast('AI 系列规划需要负责人或管理员权限', true);
-      return;
-    }
     btn.disabled = true;
     btn.innerText = 'AI 规划中（约 30-60 秒）...';
     try {
@@ -710,10 +730,10 @@ async function loadBatches(selectId = null) {
     const select = document.getElementById('batch-select');
     select.innerHTML = '';
     if (batches.length === 0) {
-      select.innerHTML = '<option value="">空库：请由负责人手动配置并批准批次</option>';
+      select.innerHTML = '<option value="">空库：请由管理员手动配置并批准批次</option>';
       state.currentBatchId = null;
       if (select._syncDD) select._syncDD();
-      showToast('空库不会自动生产。请负责人点击"新建批次"，显式确认预算后创建。', true);
+      showToast('空库不会自动生产。请管理员点击“新建任务”，显式确认预算后创建。', true);
       return;
     }
     batches.forEach(b => {
@@ -734,6 +754,7 @@ async function loadBatches(selectId = null) {
 
 async function onBatchChanged() {
   const curBatch = state.batches.find(b => b.id === state.currentBatchId);
+  panoramaSimilarityCache.clear();
   const statusEl = document.getElementById('current-batch-status');
   if (curBatch) {
     document.getElementById('current-batch-name').innerText = curBatch.name;
@@ -754,7 +775,7 @@ async function onBatchChanged() {
     document.getElementById('metric-target').innerText = curBatch.target_archived_count;
     const startHint = document.getElementById('plan-start-hint');
     startHint.classList.toggle('hidden', !(curBatch.smart_planning && curBatch.planning_confirmed && curBatch.pause_reason === 'AWAITING_LEADER_START'));
-    document.getElementById('btn-start-from-plans').disabled = state.currentRole === 'operator';
+    document.getElementById('btn-start-from-plans').disabled = !['leader', 'admin'].includes(state.currentRole);
   }
   const snapshotText = {
     approved_frozen: '本批次已冻结完整批准规则与模板版本；追加候补/唤醒均使用快照。',
@@ -782,6 +803,9 @@ async function loadBudget() {
 function updateBudgetUI() {
   const b = state.budget;
   if (!b) return;
+  document.getElementById('task-quota').innerText = `${Math.max(0, b.hard_limit_budget - b.image_generation_count)} 次`;
+  const quotaBatch = state.batches.find(x => x.id === state.currentBatchId);
+  document.getElementById('task-quota-status').innerText = b.circuit_broken ? '任务熔断，暂停生成' : b.hard_limit_reached ? '已达硬上限' : b.warning_reached && !b.warning_approved ? '达到预警线，需管理员批准' : quotaBatch?.pause_reason === 'PAUSE_UNKNOWN_PENDING' ? '结果未知，任务暂停' : quotaBatch?.status === 'paused' ? '任务暂停中' : quotaBatch?.status === 'completed' ? '任务已完成' : '含在途及结果未知的占用';
   document.getElementById('metric-used').innerText = `${b.used_count}`;
   document.getElementById('metric-reserved').innerText = `${b.reserved_count} 次`;
   document.getElementById('metric-warning').innerText = `${b.warning_budget} 次`;
@@ -803,8 +827,8 @@ function updateBudgetUI() {
   const btnApprove = document.getElementById('btn-approve-warning');
   if (b.warning_reached && !b.warning_approved) {
     btnApprove.classList.remove('hidden');
-    btnApprove.innerText = state.currentRole === 'leader' ? '负责人特批越过预警线' : '预警暂停 (需负责人审批)';
-    btnApprove.disabled = state.currentRole !== 'leader';
+    btnApprove.innerText = ['leader', 'admin'].includes(state.currentRole) ? '批准越过预警线' : '预警暂停 (需管理员审批)';
+    btnApprove.disabled = !['leader', 'admin'].includes(state.currentRole);
   } else {
     btnApprove.classList.add('hidden');
   }
@@ -813,7 +837,7 @@ function updateBudgetUI() {
   const currentBatch = state.batches.find(x => x.id === state.currentBatchId);
   const canRecover = !!currentBatch?.is_circuit_broken;
   btnRecover.classList.toggle('hidden', !canRecover);
-  btnRecover.disabled = state.currentRole === 'operator';
+  btnRecover.disabled = !['leader', 'admin'].includes(state.currentRole);
   btnRecover.title = canRecover ? `剩余试运行额度将重置为 3（当前 ${currentBatch.trial_run_remaining ?? 0}）` : '';
 
   const startButton = document.getElementById('btn-start-batch');
@@ -821,8 +845,8 @@ function updateBudgetUI() {
     currentBatch?.status === 'paused' && currentBatch?.pause_reason !== 'PAUSE_UNKNOWN_PENDING'
   ));
   startButton.classList.toggle('hidden', !canStart);
-  startButton.disabled = state.currentRole === 'operator';
-  document.getElementById('btn-start-from-plans').disabled = state.currentRole === 'operator';
+  startButton.disabled = !['leader', 'admin'].includes(state.currentRole);
+  document.getElementById('btn-start-from-plans').disabled = !['leader', 'admin'].includes(state.currentRole);
 }
 
 // 加载设计列表
@@ -837,6 +861,9 @@ async function loadDesigns(forceRender = false) {
     const target = parseInt(document.getElementById('metric-target').innerText) || 3;
     const pct = Math.min(100, Math.round((archivedCount / target) * 100));
     document.getElementById('progress-archived').style.width = `${pct}%`;
+    document.getElementById('metric-remaining').innerText = Math.max(0, target - archivedCount);
+    document.getElementById('metric-pending').innerText = designs.filter(d => d.status === 'panorama_review').length;
+    refreshWorkbenchInfo();
 
     const panoDesigns = designs.filter(d => !d.is_standby && ['draft', 'panorama_generating', 'panorama_review'].includes(d.status));
     const quadDesigns = designs.filter(d => !d.is_standby && ['panorama_approved', 'downstream_generating', 'quad_review'].includes(d.status));
@@ -848,13 +875,25 @@ async function loadDesigns(forceRender = false) {
     document.getElementById('badge-standby-count').innerText = standbyDesigns.length;
     document.getElementById('badge-archived-count').innerText = archDesigns.length;
 
-    renderCurrentTab();
+    // 后台轮询只在数据真正变化时重绘，避免每 3 秒重建 DOM：
+    // 既会吞掉用户点击，也会覆盖管理中心里正在填写的配置。
+    const signature = designs.map(d => [
+      d.id, d.status, d.planning_status, d.total_redo_count,
+      d.slots.panorama?.current_version_id, d.slots.panorama?.status, d.slots.panorama?.redo_count,
+      d.slots.white_isolated?.current_version_id, d.slots.white_isolated?.status,
+      d.slots.twin_bed?.current_version_id, d.slots.twin_bed?.status,
+      d.slots.nightstand_closeup?.current_version_id, d.slots.nightstand_closeup?.status,
+    ].join('|')).join(';');
+    if (forceRender || signature !== state.designSignature) {
+      state.designSignature = signature;
+      renderCurrentTab(true);
+    }
   } catch (e) {
     console.error('加载设计组失败:', e);
   }
 }
 
-function renderCurrentTab() {
+function renderCurrentTab(background = false) {
   if (state.activeTab === 'panorama') {
     renderPanoramaTab();
   } else if (state.activeTab === 'quad') {
@@ -863,8 +902,11 @@ function renderCurrentTab() {
     renderStandbyTab();
   } else if (state.activeTab === 'archived') {
     renderArchivedTab();
-  } else if (state.activeTab === 'system') {
+  } else if (state.activeTab === 'styles' && !background) {
     loadSeriesRules();
+  } else if (state.activeTab === 'system' && !background) {
+    // 管理中心只在手动进入时刷新，避免轮询覆盖正在填写的 API / 规则 / 水印表单。
+    loadWorkbenchSettings();
     loadImageApiConfig();
     loadTextApiConfig();
     loadUnknownTasks();
@@ -923,17 +965,19 @@ function collectImageApiConfig(includeKey = false) {
 }
 
 async function saveImageApiConfig() {
-  await apiFetch('/api/system/image_api', {
+  const saved = await apiFetch('/api/system/image_api', {
     method: 'PUT',
     body: JSON.stringify(collectImageApiConfig(true))
   });
   await loadImageApiConfig();
+  return saved;
 }
 
 async function loadSeriesRules() {
   try {
     const rules = await apiFetch('/api/system/series_rules');
     state.seriesRules = rules;
+    renderStyleCards(rules);
     const select = document.getElementById('series-rule-select');
     const previous = select.value;
     select.innerHTML = '';
@@ -950,8 +994,52 @@ async function loadSeriesRules() {
     document.getElementById('series-template-version').innerText =
       `当前模板版本: ${rule.template_version}（已归档设计冻结于各自版本）`;
     document.getElementById('series-rule-json').value = JSON.stringify({ ...rule }, null, 2);
+    document.getElementById('style-name').value = rule.name || '';
+    document.getElementById('style-name').readOnly = ['modern_business', 'natural_wood', 'soft_contemporary'].includes(select.value);
+    document.getElementById('style-description').value = rule.description || '';
+    document.getElementById('style-materials').value = (rule.materials || []).join('\n');
+    document.getElementById('style-colors').value = (rule.color_palette || []).join('\n');
   } catch (e) {
     showToast('加载系列规则失败: ' + e.message, true);
+  }
+}
+
+let lastQuotaTime = null;
+let quotaLoading = false;
+async function loadUpstreamQuota() {
+  if (quotaLoading) return;
+  quotaLoading = true;
+  const value = document.getElementById('upstream-quota-value');
+  const time = document.getElementById('upstream-quota-time');
+  try {
+    const data = await apiFetch('/api/workbench/upstream-quota');
+    if (data.status !== 'ok') throw new Error('unavailable');
+    lastQuotaTime = data.checked_at;
+    value.textContent = `${data.quota} 次`;
+    time.textContent = `更新于 ${new Date(lastQuotaTime).toLocaleString('zh-CN')}`;
+  } catch (_) {
+    value.textContent = '暂不可获取';
+    time.textContent = lastQuotaTime ? `上次成功 ${new Date(lastQuotaTime).toLocaleString('zh-CN')}` : '尚无成功查询记录';
+  } finally { quotaLoading = false; }
+}
+
+function renderStyleCards(rules) {
+  const container = document.getElementById('style-cards');
+  container.replaceChildren();
+  for (const [id, rule] of Object.entries(rules)) {
+    const card = document.createElement('article'); card.className = 'style-card';
+    const title = document.createElement('h3'); title.textContent = rule.name || id;
+    const description = document.createElement('p'); description.textContent = rule.description || rule.hotel_mood || '暂无风格说明';
+    const materials = document.createElement('p'); materials.textContent = `材质：${(rule.materials || []).join('、') || '未设置'}`;
+    const colors = document.createElement('p'); colors.textContent = `配色：${(rule.color_palette || []).join('、') || '未设置'}`;
+    const edit = document.createElement('button'); edit.className = 'wb-btn wb-btn-ghost'; edit.type = 'button'; edit.textContent = '编辑系列';
+    edit.onclick = async () => {
+      const select = document.getElementById('series-rule-select'); select.value = id;
+      if (select._syncDD) select._syncDD();
+      await loadSeriesRules(); document.getElementById('style-editor').classList.remove('hidden');
+      document.getElementById('style-editor').scrollIntoView({behavior:'smooth', block:'start'});
+    };
+    card.append(title, description, materials, colors, edit); container.appendChild(card);
   }
 }
 
@@ -979,7 +1067,7 @@ async function renderSeriesChecks() {
       span.textContent = `${rule.name || sid}（${sid}）`;
       label.appendChild(cb);
       label.appendChild(span);
-      for (const [cls, title, value, min] of [['series-primary', '正式款', 2, 1], ['series-standby', '候补款', 1, 0]]) {
+      for (const [cls, title, value, min] of [['series-primary', '组数', 2, 1]]) {
         const text = document.createElement('span'); text.textContent = title; text.className = 'text-xs';
         const number = document.createElement('input'); number.type = 'number'; number.min = min; number.max = 30; number.value = value; number.className = `${cls} wb-input`; number.style.width = '4.5rem'; number.setAttribute('aria-label', `${rule.name || sid}${title}数量`);
         label.appendChild(text); label.appendChild(number);
@@ -1002,8 +1090,91 @@ function panoStatusBadge(d, pSlot) {
   return '<span class="wb-badge wb-badge-amber">待人工初筛</span>';
 }
 
+// 相似款提醒只是辅助信号：后台最多自动重规划两次后仍相似时，
+// 继续生成并在这里提醒美工，由人判断是否重复。
+const panoramaSimilarityCache = new Map();
+
+// 方案一旦被重新规划，家具特征就变了，旧的相似结果必须失效，
+// 否则卡片会继续显示规划前算出来的提醒数量。
+function similarityCacheKey(design) {
+  const spec = design?.structured_spec || {};
+  const fingerprint = ['headboard', 'bed_frame', 'nightstand', 'wardrobe']
+    .map(k => String(spec[k] || '')).join('|');
+  let hash = 0;
+  for (let i = 0; i < fingerprint.length; i += 1) {
+    hash = (hash * 31 + fingerprint.charCodeAt(i)) | 0;
+  }
+  return `${design.id}::${hash}`;
+}
+
+function paintSimilarityWarning(card, candidates) {
+  const slot = card.querySelector('[data-similarity-slot]');
+  if (!slot) return;
+  slot.replaceChildren();
+  if (!candidates || !candidates.length) return;
+  const details = document.createElement('details');
+  details.className = 'similarity-warning';
+  const summary = document.createElement('summary');
+  summary.textContent = `⚠ 相似提醒 ${candidates.length} 款 · 点击查看相似部位与对照图`;
+  details.appendChild(summary);
+  const body = document.createElement('div');
+  body.className = 'similarity-body';
+  body.appendChild(candidateList(candidates));
+  details.appendChild(body);
+  slot.appendChild(details);
+  const key = `${card.dataset.designId}::.similarity-warning`;
+  if (panoramaOpenDetails.has(key)) details.open = true;
+  else panoramaOpenDetails.delete(key);
+}
+
+async function refreshPanoramaSimilarities(container) {
+  const cards = [...container.querySelectorAll('[data-design-id]')];
+  for (const card of cards) {
+    const designId = card.dataset.designId;
+    const design = state.designs.find(d => d.id === designId);
+    const key = similarityCacheKey(design);
+    if (panoramaSimilarityCache.has(key)) {
+      paintSimilarityWarning(card, panoramaSimilarityCache.get(key));
+      continue;
+    }
+    try {
+      const candidates = await apiFetch(`/api/planning/design/${designId}/similarities`);
+      panoramaSimilarityCache.set(key, candidates);
+      if (!card.isConnected) continue;
+      paintSimilarityWarning(card, candidates);
+    } catch (e) {
+      // 相似提醒是辅助信息，读取失败不得阻断人工审核。
+      console.warn('相似提醒读取失败', e);
+    }
+  }
+}
+
+// 重绘时保留美工已经展开的详情与相似提醒，避免轮询把展开状态收起来。
+const panoramaOpenDetails = new Set();
+
+function captureOpenDetails(container) {
+  for (const card of container.querySelectorAll('[data-design-id]')) {
+    const id = card.dataset.designId;
+    for (const selector of ['.workbench-details', '.similarity-warning']) {
+      const node = card.querySelector(selector);
+      if (node && node.open) panoramaOpenDetails.add(`${id}::${selector}`);
+      else panoramaOpenDetails.delete(`${id}::${selector}`);
+    }
+  }
+}
+
+function restoreOpenDetails(card) {
+  const id = card.dataset.designId;
+  for (const selector of ['.workbench-details', '.similarity-warning']) {
+    if (!panoramaOpenDetails.has(`${id}::${selector}`)) continue;
+    const node = card.querySelector(selector);
+    if (node) node.open = true;
+  }
+}
+
 function renderPanoramaTab() {
   const container = document.getElementById('panorama-cards-grid');
+  captureOpenDetails(container);
   container.innerHTML = '';
   const batch = state.batches.find(b => b.id === state.currentBatchId);
   if (batch?.smart_planning && !batch.planning_confirmed) return;
@@ -1024,8 +1195,8 @@ function renderPanoramaTab() {
     if (curVer && curVer.preview_image_path) {
       imgHtml = `
         <div class="relative w-full aspect-square bg-slate-100 overflow-hidden">
-          <img src="/api/media/preview/${curVer.id}" alt="${d.design_code}" class="w-full h-full object-cover">
-          <div class="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-slate-900/70 text-white text-[11px] font-mono backdrop-blur-xs">
+          <img src="/api/media/preview/${curVer.id}" alt="${d.design_code}" class="w-full h-full object-contain">
+          <div class="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-slate-900/70 text-white text-[11px] font-mono backdrop-blur-xs">
             ${d.design_code} · v${curVer.version_num}
           </div>
           <div class="absolute bottom-2 right-2 px-2 py-0.5 rounded-full bg-emerald-600/80 text-white text-[10px] font-semibold">
@@ -1059,25 +1230,18 @@ function renderPanoramaTab() {
 
     const spec = d.structured_spec;
     const isReady = pSlot.status === 'ready' && curVer;
+    card.dataset.designId = d.id;
 
     card.innerHTML = `
       ${imgHtml}
       <div class="p-4 flex-1 flex flex-col justify-between space-y-3">
         <div>
           <div class="flex items-center justify-between gap-2">
-            <span class="text-xs font-bold text-inkTitle truncate">${escapeText(spec.model_title || d.design_code)}</span>
+            <span class="text-xs font-bold text-inkTitle truncate">${isReady ? `<input type="checkbox" data-select="panorama" data-id="${d.id}" aria-label="选择 ${escapeText(d.design_code)}">` : ''} ${escapeText(spec.model_title || d.design_code)}</span>
             ${panoStatusBadge(d, pSlot)}
           </div>
-          <div class="mt-2 text-[11px] text-inkMuted space-y-0.5 bg-slate-50/60 border border-lineLight rounded-xl p-2.5">
-            <div><span class="text-inkBody font-semibold">床屏:</span> ${escapeText(spec.headboard)}</div>
-            <div><span class="text-inkBody font-semibold">床体:</span> ${escapeText(spec.bed_frame)}</div>
-            <div><span class="text-inkBody font-semibold">柜体:</span> ${escapeText(spec.nightstand)}</div>
-            <div><span class="text-inkBody font-semibold">材质:</span> ${escapeText((spec.main_materials || []).join(', '))}</div>
-          </div>
-          <div class="mt-2 text-[10px] text-slate-300 font-mono flex items-center justify-between">
-            <span>槽位重做 ${pSlot.redo_count}/2</span>
-            <span>整组累计 ${d.total_redo_count}/4</span>
-          </div>
+          <div class="similarity-slot" data-similarity-slot></div>
+          <details class="workbench-details"><summary>查看设计与提示词</summary><p>床屏：${escapeText(spec.headboard)}</p><p>床体：${escapeText(spec.bed_frame)}</p><p>床头柜：${escapeText(spec.nightstand)}</p><p>提示词：${escapeText(spec.panorama_prompt || '暂无')}</p></details>
         </div>
 
         <div class="pt-3 border-t border-slate-100 flex items-center gap-2">
@@ -1102,22 +1266,27 @@ function renderPanoramaTab() {
     `;
 
     container.appendChild(card);
+    restoreOpenDetails(card);
   });
+
+  refreshPanoramaSimilarities(container);
 
   container.querySelectorAll('.btn-approve-pano').forEach(b => {
     b.addEventListener('click', async () => {
       try {
-        await apiFetch(`/api/designs/${b.dataset.id}/review_panorama`, {
+        const result = await apiFetch(`/api/workbench/batches/${state.currentBatchId}/approve-panoramas`, {
           method: 'POST',
-          body: JSON.stringify({ action: 'approve', expected_version_id: b.dataset.vid })
+          body: JSON.stringify({ versions: { [b.dataset.id]: b.dataset.vid } })
         });
-        showToast('全景已初筛通过并锁定，可在"四图终审区"启动下游生成');
+        if (!result.results[0]?.ok) throw new Error(result.results[0]?.error || '处理失败');
+        showToast('全景已通过，正在生成白底图');
         await loadDesigns(true);
       } catch (e) {
         showToast(e.message, true);
       }
     });
   });
+  syncBulkSelections();
 
   container.querySelectorAll('[data-action="pano-compare"]').forEach(b => {
     b.addEventListener('click', () => showComparison(b.dataset.id));
@@ -1221,7 +1390,7 @@ function renderQuadTab() {
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-3 border-b border-lineLight">
         <div class="min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
-            <h3 class="text-sm font-bold text-inkTitle truncate">${escapeText(d.design_code)} - ${escapeText(d.structured_spec.model_title)}</h3>
+            <h3 class="text-sm font-bold text-inkTitle truncate">${d.status === 'quad_review' && allSlotsReady ? `<input type="checkbox" data-select="quad" data-id="${d.id}" aria-label="选择 ${escapeText(d.design_code)}">` : ''} ${escapeText(d.design_code)} - ${escapeText(d.structured_spec.model_title)}</h3>
             ${statusBadge}
           </div>
           <p class="text-[11px] text-inkMuted mt-1">系列: ${d.series_name} <span class="font-mono">| 累计重做 ${d.total_redo_count}/4</span></p>
@@ -1268,6 +1437,7 @@ function renderQuadTab() {
       }
     });
   });
+  syncBulkSelections();
 
   container.querySelectorAll('.btn-archive-quad').forEach(b => {
     b.addEventListener('click', async () => {
@@ -1332,7 +1502,7 @@ function renderQuadTab() {
       const replaceDesignId = sel.dataset.designId;
       const versionId = e.target.value;
       if (slotType === 'panorama') {
-        if (state.currentRole === 'operator') {
+        if (!['leader', 'admin'].includes(state.currentRole)) {
           showToast('全景替换必须由负责人或管理员确认', true);
           await loadDesigns(true);
           return;
@@ -1378,7 +1548,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
   if (curVer && curVer.preview_image_path) {
     imgArea = `
       <div class="relative w-full aspect-square bg-slate-100 rounded-xl overflow-hidden border border-lineLight">
-        <img src="/api/media/preview/${curVer.id}" alt="${design.design_code} ${label}" class="w-full h-full object-cover">
+        <img src="/api/media/preview/${curVer.id}" alt="${design.design_code} ${label}" class="w-full h-full object-contain">
         ${
           isInvalidated
           ? `<div class="absolute inset-0 bg-rose-900/60 backdrop-blur-xs flex items-center justify-center text-white text-xs font-bold p-2 text-center">
@@ -1476,7 +1646,7 @@ function renderStandbyTab() {
     card.className = 'wb-card p-4 space-y-3';
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs font-bold text-inkTitle font-mono">${d.design_code}</span>
+        <span class="text-xs font-bold text-inkTitle font-mono">${escapeText(d.design_code)}</span>
         <span class="wb-badge wb-badge-amber">${['pending', 'pending_append', 'ready_append'].includes(d.planning_status) || (state.batches.find(b => b.id === d.batch_id)?.smart_planning && !state.batches.find(b => b.id === d.batch_id)?.planning_confirmed) ? '待规划或确认' : '候补待命 (未耗生图额度)'}</span>
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(spec.model_title)}</div>
@@ -1514,12 +1684,12 @@ function renderArchivedTab() {
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs font-bold text-inkTitle font-mono">${d.design_code}</span>
-        <span class="wb-badge wb-badge-emerald">✓ 已终审归档</span>
+        <label class="text-xs font-bold text-inkTitle font-mono"><input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出"> ${escapeText(d.design_code)}</label>
+        <span class="wb-badge wb-badge-emerald">✓ 已完成</span>
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(d.structured_spec.model_title)}</div>
 
-      <div class="grid grid-cols-4 gap-1.5">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
         ${['panorama', 'white_isolated', 'twin_bed', 'nightstand_closeup'].map(stype => {
           const sl = slots[stype];
           const vid = sl && sl.current_version ? sl.current_version.id : null;
@@ -1529,11 +1699,10 @@ function renderArchivedTab() {
         }).join('')}
       </div>
 
-      <div class="pt-2 flex justify-end">
+      <details class="workbench-details"><summary>查看完整套图与设计说明</summary><p>系列：${escapeText(d.series_name || '')}</p><p>材质：${escapeText((d.structured_spec.main_materials || []).join('、'))}</p><p>配色：${escapeText((d.structured_spec.color_scheme || []).join('、'))}</p></details>
+      <div class="pt-2 flex justify-end gap-2">
         <button class="wb-btn wb-btn-ghost" data-action="archived-compare" data-id="${d.id}">对照与核实</button>
-        <button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">
-          导出单款带水印 ZIP
-        </button>
+        <button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">导出单款 ZIP</button>
       </div>
     `;
     container.appendChild(card);
@@ -1542,6 +1711,7 @@ function renderArchivedTab() {
   container.querySelectorAll('[data-action="archived-compare"]').forEach(b => {
     b.addEventListener('click', () => showComparison(b.dataset.id));
   });
+  syncBulkSelections();
 
   container.querySelectorAll('.btn-export-single').forEach(b => {
     b.addEventListener('click', async () => {

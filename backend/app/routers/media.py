@@ -39,7 +39,9 @@ def get_raw_image(
     操作员 (operator) 和负责人 (leader) 访问必须直接返回 403 Forbidden！
     任何合法的管理员访问必须关联批次记录 audit_logs 审计追踪！
     """
-    if not user.is_admin:
+    # Legacy leader is admin-equivalent for admin operations, but unwatermarked
+    # originals remain restricted to the explicit system-admin role.
+    if not user.is_system_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="权限受限：仅系统管理员 (Admin) 允许直接访问无水印原图！操作员与负责人请使用带水印预览图或导出带水印成品。"

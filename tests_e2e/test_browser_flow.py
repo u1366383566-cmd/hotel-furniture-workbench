@@ -197,7 +197,7 @@ def run_browser_verification():
 
             # 1. 打开首页并明确选择主流程批次。
             page.goto(SERVER_URL, timeout=20000, wait_until="domcontentloaded")
-            page.wait_for_selector("text=酒店家具智能套图工作台", timeout=10000)
+            page.wait_for_selector("text=SEEZO 视觉工作台", timeout=10000)
             select_batch(page, main_batch_id)
             page.wait_for_timeout(1200)
             print("1. Homepage loaded successfully.")
@@ -237,14 +237,16 @@ def run_browser_verification():
             print("4. Quad tab opened, waiting for downstream launch.")
             page.screenshot(path=str(EVIDENCE_DIR / "04_quad_tab_waiting_downstream.png"))
 
-            # 点击“启动下游三图生成”
+            # 新 SEEZO 流程在全景批量通过接口中自动派发下游；兼容旧批次时仍允许手动启动。
             start_downstream_btn = page.locator(".btn-start-downstream").first
             if start_downstream_btn.is_visible():
                 start_downstream_btn.click()
                 print("5. Downstream generation triggered, waiting for mock completion...")
-                # 等待 Worker 生成三张下游图片
-                page.wait_for_timeout(6000)
-                page.screenshot(path=str(EVIDENCE_DIR / "05_quad_slots_generated.png"))
+            else:
+                print("5. Downstream already queued by panorama approval.")
+            # 等待 Worker 生成三张下游图片
+            page.wait_for_timeout(6000)
+            page.screenshot(path=str(EVIDENCE_DIR / "05_quad_slots_generated.png"))
 
             # 点击“四图合格归档”
             archive_btn = page.locator(".btn-archive-quad").first
@@ -260,7 +262,9 @@ def run_browser_verification():
             print("7. Archived tab opened.")
             page.screenshot(path=str(EVIDENCE_DIR / "07_archived_export_tab.png"))
 
-            # 5. 切换到“未知保护与系统设置”
+            # 5. 管理中心仅对管理员显示
+            page.locator('.role-btn[data-role="admin"]').click()
+            page.wait_for_timeout(500)
             page.locator('button[data-tab="system"]').click()
             page.wait_for_timeout(1500)
             print("8. System protect tab opened.")
@@ -271,7 +275,7 @@ def run_browser_verification():
 
             # 6. 结果未知任务：负责人凭据核账后释放预占额度（前端 → 后端强校验链路）
             print("9. Switching to leader role and reviewing pre-seeded unknown task...")
-            page.locator('.role-btn[data-role="leader"]').click()
+            page.locator('.role-btn[data-role="admin"]').click()
             page.wait_for_timeout(800)
             select_batch(page, unknown_batch_id)
             page.wait_for_timeout(1000)
@@ -334,12 +338,14 @@ def run_browser_verification():
             # 7. 熔断恢复入口：预置熔断批次 → 负责人点击恢复并试运行
             print("10. Recovering pre-seeded circuit breaker via UI...")
             page.reload(wait_until="domcontentloaded")
-            page.wait_for_selector("text=酒店家具智能套图工作台", timeout=10000)
+            page.wait_for_selector("text=SEEZO 视觉工作台", timeout=10000)
             page.wait_for_timeout(2000)
             select_batch(page, unknown_batch_id)
-            page.wait_for_timeout(800)
-            page.locator('.role-btn[data-role="leader"]').click()
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(1800)
+            page.locator('.role-btn[data-role="admin"]').click()
+            page.wait_for_timeout(1200)
+            page.locator('button[data-tab="system"]').click()
+            page.wait_for_timeout(1000)
 
             recover_btn = page.locator("#btn-recover-circuit")
             assert recover_btn.is_visible(), "熔断后应显示恢复按钮"
@@ -375,7 +381,9 @@ def run_browser_verification():
             print("13. Leader manually starts held batch via UI...")
             select_batch(page, manual_batch_id)
             page.wait_for_timeout(1200)
-            page.locator('.role-btn[data-role="leader"]').click()
+            page.locator('.role-btn[data-role="admin"]').click()
+            page.wait_for_timeout(800)
+            page.locator('button[data-tab="system"]').click()
             page.wait_for_timeout(800)
             start_btn = page.locator("#btn-start-batch")
             assert start_btn.is_visible(), "待启动批次应向负责人显示启动按钮"

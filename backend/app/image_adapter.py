@@ -263,7 +263,7 @@ def generate_image_real(cfg: dict, prompt: str) -> tuple[bytes, str]:
         raise ImageApiMisconfigError("生图上游配置无效: 未配置 API 密钥（环境变量或设置页）")
 
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {"model": model, "prompt": prompt, "n": 1, "response_format": "b64_json"}
+    payload = {"model": model, "prompt": prompt, "n": 1, "size": "1024x1024", "response_format": "b64_json"}
     upstream_id = f"real_{uuid.uuid4().hex[:12]}"
     try:
         with httpx.Client(timeout=cfg.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS) as client:

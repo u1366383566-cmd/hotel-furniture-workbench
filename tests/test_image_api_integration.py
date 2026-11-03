@@ -114,6 +114,7 @@ def test_b64_response_decodes_to_bytes(monkeypatch):
         assert request.headers["Authorization"] == "Bearer sk-test"
         body = json.loads(request.content)
         assert body["model"] == "gpt-image-2" and body["n"] == 1
+        assert body["size"] == "1024x1024"
         assert body["response_format"] == "b64_json"
         return httpx.Response(200, json={"id": "req_abc", "data": [{"b64_json": payload}]})
 
@@ -318,12 +319,12 @@ def test_worker_real_mode_downstream_uses_image_edit(client, monkeypatch):
     start = client.post(f"/api/designs/{design}/start_downstream")
     assert start.status_code == 200, start.text
 
-    # 下游第一棒：white_isolated —— 以全景原图为参考（固定三行版式）
+    # 下游第一棒：white_isolated —— 以全景原图为参考并自由重组
     assert worker_instance.process_next_task() is True
     assert len(edit_calls) == 1, "白底清单未走以图生图管线"
     assert edit_calls[0]["image"] == pano_bytes, "白底清单的参考图必须是全景原图"
-    assert "第一行" in edit_calls[0]["prompt"] and "三行版式" in edit_calls[0]["prompt"]
-    assert "全套大床组" in edit_calls[0]["prompt"]
+    assert "只展示参考图中实际出现且可辨认的家具" in edit_calls[0]["prompt"]
+    assert "不凭空添加、重复或重新设计家具" in edit_calls[0]["prompt"]
     with get_db(immediate=False) as conn:
         wi_row = conn.execute("""
             SELECT sv.raw_image_path FROM slots s JOIN slot_versions sv ON s.current_version_id = sv.id
@@ -336,7 +337,7 @@ def test_worker_real_mode_downstream_uses_image_edit(client, monkeypatch):
     assert len(edit_calls) == 2, "双床任务未走以图生图管线"
     from backend.app.config import RAW_IMAGES_DIR
     assert edit_calls[1]["image"] == (RAW_IMAGES_DIR / wi_row["raw_image_path"]).read_bytes(),         "双床的参考图必须是白底清单原图"
-    assert "两张单人床" in edit_calls[1]["prompt"] and "不添加衣柜" in edit_calls[1]["prompt"], edit_calls[1]["prompt"][:200]
+    assert "两张独立单人床" in edit_calls[1]["prompt"] and "仅从其中精选三组代表性单品交叉组合" in edit_calls[1]["prompt"] and "务必省略衣柜与床尾凳" in edit_calls[1]["prompt"], edit_calls[1]["prompt"][:200]
 
     with get_db(immediate=False) as conn:
         meta = json.loads(conn.execute(

@@ -248,7 +248,9 @@ def test_unknown_failure_requires_explicit_human_ledger_attestation(client):
     }, headers={"X-User-Role": "leader"})
     assert resolved.status_code == 200
 
-    logs = client.get(f"/api/system/batches/{batch_id}/audit_logs").json()
+    logs_response = client.get(f"/api/system/batches/{batch_id}/audit_logs", headers={"X-User-Role": "leader"})
+    assert logs_response.status_code == 200
+    logs = logs_response.json()
     entry = next(item for item in logs if item["action"] == "resolve_unknown_task")
     detail = __import__("json").loads(entry["detail"])
     assert detail["human_attested_no_charge"] is True
@@ -427,4 +429,4 @@ def test_frontend_has_no_leader_seeded_auto_production(client):
     source = Path("static/app.js").read_text(encoding="utf-8")
     assert "createDefaultInitialBatch" not in source
     assert "首轮批次播种" not in source
-    assert "由负责人手动配置并批准批次" in source
+    assert "由管理员手动配置并批准批次" in source

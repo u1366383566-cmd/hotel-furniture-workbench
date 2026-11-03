@@ -18,7 +18,10 @@ DB_PATH = Path(os.environ.get("WORKBENCH_DB_PATH", DB_DIR / "workbench.db")).res
 MOCK_MODE = True
 ALLOW_REMOTE_NETWORK = False
 
-# 小样与默认预算
+# 每组默认预算：自动任务按目标组数计算 5 次预警、6 次硬上限。
+# Legacy explicit batch budgets remain accepted for backwards compatibility.
+DEFAULT_WARNING_PER_GROUP = 5
+DEFAULT_HARD_LIMIT_PER_GROUP = 6
 DEFAULT_WARNING_BUDGET = 20
 DEFAULT_HARD_LIMIT_BUDGET = 25
 DEFAULT_TARGET_ARCHIVED = 3
@@ -92,11 +95,29 @@ SERIES_RULES = {
     }
 }
 
-# 默认水印设置
+# SEEZO 水印设置
+#
+# The renderer deliberately has one source of truth: the transparent SEEZO logo
+# shipped with the application. Legacy text fields remain in this mapping so old
+# batch rows and request payloads can still be read, but they are compatibility
+# fields only and are never used when an image is rendered or exported.
+SEEZO_WATERMARK_PATH = BASE_DIR / "static" / "seezo-watermark.png"
+SEEZO_WATERMARK_ASSET = "static/seezo-watermark.png"
+SEEZO_WATERMARK_WIDTH_RATIO = 418 / 1024
+SEEZO_WATERMARK_LEFT_RATIO = 0.0
+SEEZO_WATERMARK_TOP_RATIO = 83 / 1024
+
 DEFAULT_WATERMARK = {
+    "renderer": "seezo_logo",
+    "logo_asset": SEEZO_WATERMARK_ASSET,
+    "logo_width_ratio": SEEZO_WATERMARK_WIDTH_RATIO,
+    "logo_left_ratio": SEEZO_WATERMARK_LEFT_RATIO,
+    "logo_top_ratio": SEEZO_WATERMARK_TOP_RATIO,
+    # Backward-compatible request/database fields. They are intentionally not
+    # consulted by watermark_service.apply_watermark().
     "main_text": "HOTEL WORKBENCH - CONFIDENTIAL",
     "repeat_text": "SAMPLE PREVIEW NOT FOR COMMERCIAL",
     "opacity": 0.22,
     "font_size": 36,
-    "position": "bottom_right"
+    "position": "bottom_right",
 }

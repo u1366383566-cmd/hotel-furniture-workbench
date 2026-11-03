@@ -7,8 +7,12 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional
 from PIL import Image
-from .config import EXPORTS_DIR, RAW_IMAGES_DIR, DEFAULT_WATERMARK
-from .watermark_service import apply_watermark
+from .config import EXPORTS_DIR, RAW_IMAGES_DIR
+from .watermark_service import (
+    apply_watermark,
+    ensure_watermark_config_schema,
+    watermark_config,
+)
 from .security import safe_file_path
 
 def export_designs_to_watermarked_zip(
@@ -33,12 +37,16 @@ def export_designs_to_watermarked_zip(
 
     # 获取水印配置
     cur = conn.cursor()
-    cur.execute("SELECT main_text, repeat_text, opacity, font_size, position FROM watermark_configs WHERE batch_id = ?", (batch_id,))
+    # Read legacy columns for existing databases, then normalize to the explicit
+    # SEEZO logo config. Legacy text/tile values never reach the renderer.
+    ensure_watermark_config_schema(conn)
+    cur.execute("""
+        SELECT renderer, logo_asset, logo_width_ratio, logo_left_ratio, logo_top_ratio,
+               main_text, repeat_text, opacity, font_size, position
+        FROM watermark_configs WHERE batch_id = ?
+    """, (batch_id,))
     wm_row = cur.fetchone()
-    if wm_row:
-        wm_cfg = dict(wm_row)
-    else:
-        wm_cfg = DEFAULT_WATERMARK
+    wm_cfg = watermark_config(dict(wm_row) if wm_row else None)
 
     zip_filename = f"export_{batch_id}_{uuid.uuid4().hex[:8]}.zip"
     final_zip_path = EXPORTS_DIR / zip_filename
@@ -83,14 +91,9 @@ def export_designs_to_watermarked_zip(
 
                 try:
                     with Image.open(raw_file_path) as img:
-                        watermarked_img = apply_watermark(
-                            img,
-                            main_text=wm_cfg.get("main_text", DEFAULT_WATERMARK["main_text"]),
-                            repeat_text=wm_cfg.get("repeat_text", DEFAULT_WATERMARK["repeat_text"]),
-                            opacity=float(wm_cfg.get("opacity", 0.22)),
-                            font_size=int(wm_cfg.get("font_size", 36)),
-                            position=wm_cfg.get("position", "bottom_right")
-                        )
+                        # Always re-watermark the historical raw source. Never
+                        # export an existing preview or an unwatermarked fallback.
+                        watermarked_img = apply_watermark(img, watermark_cfg=wm_cfg)
                         # 保存到内存字节流再打入 ZIP；低压缩级别显著缩短批量导出耗时
                         buf = io.BytesIO()
                         watermarked_img.save(buf, format="PNG", compress_level=1)

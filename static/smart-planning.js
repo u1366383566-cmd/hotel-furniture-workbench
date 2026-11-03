@@ -49,7 +49,7 @@ async function loadPlanningPanel() {
     if (!visible.length) { panel.classList.add('hidden'); return; }
     panel.classList.remove('hidden');
     document.getElementById('plan-panel-title').textContent = readOnly ? '已确认的设计方案' : '生图前设计规划';
-    document.getElementById('plan-panel-description').textContent = readOnly ? '展开查看已确认的方案；核对预算后可启动全景。' : '先生成并审核正式款与候补款，核对相似提醒后由负责人确认；确认后再启动全景。';
+    document.getElementById('plan-panel-description').textContent = readOnly ? '展开查看已确认的方案；核对预算后可启动全景。' : '先生成并审核正式款与候补款，核对相似提醒后由管理员确认；确认后再启动全景。';
     document.getElementById('btn-plan-all').classList.toggle('hidden', readOnly);
     document.getElementById('btn-plan-confirm').classList.toggle('hidden', readOnly);
     document.getElementById('btn-plan-confirm').textContent = data.confirmed ? '确认追加候补' : '确认全部方案';
@@ -131,8 +131,9 @@ async function loadPlanningPanel() {
       }
       details.appendChild(body); card.appendChild(details); container.appendChild(card);
     }
-    document.getElementById('btn-plan-all').disabled = planBusy || state.currentRole === 'operator';
-    document.getElementById('btn-plan-confirm').disabled = planBusy || state.currentRole === 'operator' || visible.some(d=>!['ready','ready_append'].includes(d.status));
+    const canManagePlanning = ['leader', 'admin'].includes(state.currentRole);
+    document.getElementById('btn-plan-all').disabled = planBusy || !canManagePlanning;
+    document.getElementById('btn-plan-confirm').disabled = planBusy || !canManagePlanning || visible.some(d=>!['ready','ready_append'].includes(d.status));
   } catch(e) { showToast(e.message, true); }
 }
 document.addEventListener('DOMContentLoaded', () => {
@@ -176,7 +177,7 @@ async function showComparison(designId) {
     const inputs = {};
     for (const [key, label] of planFields.slice(0,4)) {
       const l = element('label', undefined, 'block text-xs'); l.appendChild(element('span', label));
-      const t = element('textarea'); t.className = 'wb-input'; t.rows=2; t.value = current.verified_features[key] || design.structured_spec[key] || ''; inputs[key] = t; l.appendChild(t); dialog.appendChild(l);
+      const t = element('textarea'); t.className = 'wb-input comparison-textarea'; t.rows=2; t.value = current.verified_features[key] || design.structured_spec[key] || ''; inputs[key] = t; l.appendChild(t); dialog.appendChild(l);
     }
     dialog.appendChild(element('h4', '可能相似的历史或在途款', 'text-xs font-bold'));
     dialog.appendChild(candidateList(candidates));

@@ -7,9 +7,9 @@ def test_cleanup_protection_policy(client):
     op_forbidden = client.post("/api/system/cleanup", json={"days_threshold": 30}, headers={"X-User-Role": "operator"})
     assert op_forbidden.status_code == 403
 
-    # 2. 负责人触发清理同样被 403 阻断
-    ldr_forbidden = client.post("/api/system/cleanup", json={"days_threshold": 30}, headers={"X-User-Role": "leader"})
-    assert ldr_forbidden.status_code == 403
+    # 2. 旧负责人身份兼容管理员能力，可进入受保护清理入口；系统仍记录原始角色。
+    ldr_allowed = client.post("/api/system/cleanup", json={"days_threshold": 30}, headers={"X-User-Role": "leader"})
+    assert ldr_allowed.status_code == 200
 
     # 3. 创建批次并完成一套归档设计
     b_res = client.post("/api/batches", json={

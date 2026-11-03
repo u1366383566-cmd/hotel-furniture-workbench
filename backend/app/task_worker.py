@@ -365,10 +365,11 @@ class TaskWorker:
                     conn.execute("""
                         UPDATE slot_versions
                         SET raw_image_path = ?, preview_image_path = ?, process_status = 'completed',
-                            upstream_request_id = ?, is_invalidated = 1,
+                            upstream_request_id = ?, is_invalidated = 1, is_mock = ?,
                             error_message = 'Discarded: depends on replaced panorama'
                         WHERE id = ?
-                    """, (raw_name, preview_name, upstream_request_id, slot_version_id))
+                    """, (raw_name, preview_name, upstream_request_id,
+                          0 if image_api_cfg["enabled"] else 1, slot_version_id))
                     conn.execute("""
                         UPDATE tasks SET status = 'completed',
                             last_error = 'Discarded: downstream dependency replaced',
@@ -380,11 +381,12 @@ class TaskWorker:
                     return
 
                 conn.execute("""
-                    UPDATE slot_versions 
+                    UPDATE slot_versions
                     SET raw_image_path = ?, preview_image_path = ?, process_status = 'completed',
-                        upstream_request_id = ?
+                        upstream_request_id = ?, is_mock = ?
                     WHERE id = ?
-                """, (raw_name, preview_name, upstream_request_id, slot_version_id))
+                """, (raw_name, preview_name, upstream_request_id,
+                      0 if image_api_cfg["enabled"] else 1, slot_version_id))
 
                 if image_api_cfg["enabled"] and not is_stale_task:
                     # 真实模式：把实际发送的提示词与上游信息持久化到版本 metadata（可追溯）

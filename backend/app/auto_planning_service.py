@@ -41,13 +41,34 @@ def process_next_plan():
         with get_db() as conn:
             current = _design(conn,job['design_id'])
             already_planned = current['planning_status']=='ready'
+            replan_count = int(job['replan_count'] or 0)
         if not already_planned:
-            for attempt in range(3):
-                generate(job['design_id'], ReplanRequest(feedback='请调整家具造型，减少与已有款的相似。' if attempt else ''), UserContext('auto_planner','admin'))
+            # ``replan_count`` is persisted before each corrective model call,
+            # so a restart cannot silently grant more than two replans.
+            while True:
+                feedback = '请调整家具造型，减少与已有款的相似。' if replan_count else ''
+                if replan_count:
+                    with get_db(immediate=True) as conn:
+                        conn.execute("UPDATE planning_jobs SET replan_count=? WHERE id=?", (replan_count, job['id']))
+                generate(job['design_id'], ReplanRequest(feedback=feedback), UserContext('auto_planner','admin'))
                 with get_db() as conn:
                     similar = _candidates(conn,_design(conn,job['design_id']))
-                if not similar:
+                if not similar or replan_count >= 2:
+                    if similar and replan_count >= 2:
+                        with get_db(immediate=True) as conn:
+                            row = _design(conn, job['design_id'])
+                            spec = json.loads(row['structured_spec'])
+                            spec['planning_review_warning'] = {
+                                'reason': 'similarity_after_max_replans',
+                                'replan_count': replan_count,
+                                'similarities': similar,
+                            }
+                            conn.execute(
+                                "UPDATE designs SET structured_spec=?, planning_status='ready', updated_at=datetime('now','localtime') WHERE id=?",
+                                (json.dumps(spec, ensure_ascii=False), job['design_id']),
+                            )
                     break
+                replan_count += 1
         with get_db(immediate=True) as conn:
             row = conn.execute('SELECT d.design_code,d.status,b.status AS batch_status,b.is_circuit_broken FROM designs d JOIN batches b ON b.id=d.batch_id WHERE d.id=?', (job['design_id'],)).fetchone()
             if not row or row['status'] != 'draft' or row['batch_status'] != 'active' or row['is_circuit_broken']:

@@ -1,9 +1,15 @@
 import io
-import math
-from pathlib import Path
 from typing import Dict, Any, Optional
 from PIL import Image, ImageDraw, ImageFont
-from .config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, DEFAULT_WATERMARK, BASE_DIR
+from .config import (
+    RAW_IMAGES_DIR,
+    PREVIEW_IMAGES_DIR,
+    DEFAULT_WATERMARK,
+    SEEZO_WATERMARK_PATH,
+    SEEZO_WATERMARK_WIDTH_RATIO,
+    SEEZO_WATERMARK_LEFT_RATIO,
+    SEEZO_WATERMARK_TOP_RATIO,
+)
 
 def get_default_font(size: int = 24) -> ImageFont.ImageFont:
     """获取默认字体，跨平台 fallback"""
@@ -132,44 +138,87 @@ def create_mock_furniture_image(
     
     return img
 
-# 平铺水印贴片按 (文本, 字号, 透明度) 缓存：批量导出 12 张图共用同一配置时，
-# 只需渲染/旋转一次，而不是每张图旋转 ~63 次。
-_TILE_CACHE = {}
-
-def _get_repeat_tile(repeat_text: str, font_size: int, opacity: float):
-    key = (repeat_text, font_size, round(opacity, 4))
-    tile = _TILE_CACHE.get(key)
-    if tile is None:
-        repeat_font = get_default_font(max(14, int(font_size * 0.45)))
-        repeat_alpha = int(255 * (opacity * 0.55))
-        temp_txt = Image.new("RGBA", (240, 60), (0, 0, 0, 0))
-        tdraw = ImageDraw.Draw(temp_txt)
-        tdraw.text((10, 15), repeat_text, fill=(120, 120, 140, repeat_alpha), font=repeat_font)
-        tile = temp_txt.rotate(25, expand=1)
-        if len(_TILE_CACHE) > 32:
-            _TILE_CACHE.clear()
-        _TILE_CACHE[key] = tile
-    return tile
-
 def apply_watermark(
     image: Image.Image,
     main_text: str = DEFAULT_WATERMARK["main_text"],
     repeat_text: str = DEFAULT_WATERMARK["repeat_text"],
-    opacity: float = 0.22,
-    font_size: int = 36,
-    position: str = "bottom_right"
+    opacity: float = DEFAULT_WATERMARK["opacity"],
+    font_size: int = DEFAULT_WATERMARK["font_size"],
+    position: str = DEFAULT_WATERMARK["position"],
+    *,
+    watermark_cfg: Optional[Dict[str, Any]] = None,
 ) -> Image.Image:
+    """Render the single SEEZO logo watermark used by previews and exports.
+
+    ``main_text``, ``repeat_text``, ``opacity``, ``font_size`` and ``position``
+    remain accepted for old callers and request payloads. They are deliberately
+    ignored: logo geometry is controlled only by the explicit SEEZO settings in
+    :mod:`config`, so no text or tiled watermark can leak into an output.
     """
-    统一添加 SEEZO 标识。保留历史参数以兼容既有调用与配置。
-    """
+    del main_text, repeat_text, opacity, font_size, position
+    cfg = watermark_cfg or DEFAULT_WATERMARK
+    width_ratio = float(cfg.get("logo_width_ratio", SEEZO_WATERMARK_WIDTH_RATIO))
+    left_ratio = float(cfg.get("logo_left_ratio", SEEZO_WATERMARK_LEFT_RATIO))
+    top_ratio = float(cfg.get("logo_top_ratio", SEEZO_WATERMARK_TOP_RATIO))
+    if width_ratio <= 0 or width_ratio > 1:
+        raise ValueError("logo_width_ratio must be between 0 and 1")
+    if left_ratio < 0 or top_ratio < 0:
+        raise ValueError("logo offsets must be non-negative")
+
     base = image.convert("RGBA")
-    with Image.open(BASE_DIR / 'static' / 'seezo-watermark.png') as source:
-        logo = source.convert('RGBA')
-    width = max(1, round(base.width * 0.20))
+    with Image.open(SEEZO_WATERMARK_PATH) as source:
+        logo = source.convert("RGBA")
+    width = max(1, round(base.width * width_ratio))
     height = max(1, round(width * logo.height / logo.width))
     logo = logo.resize((width, height), Image.Resampling.LANCZOS)
-    base.alpha_composite(logo, (0, round(base.height * 0.02)))
-    return base.convert('RGB')
+    x = round(base.width * left_ratio)
+    y = round(base.height * top_ratio)
+    base.alpha_composite(logo, (x, y))
+    return base.convert("RGB")
+
+
+def watermark_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Normalize legacy or logo settings to the explicit SEEZO config."""
+    normalized = dict(DEFAULT_WATERMARK)
+    if config:
+        normalized.update({
+            key: config[key]
+            for key in (
+                "renderer", "logo_asset", "logo_width_ratio", "logo_left_ratio", "logo_top_ratio",
+                # Preserve legacy API/database fields for compatibility. The
+                # renderer intentionally ignores them.
+                "main_text", "repeat_text", "opacity", "font_size", "position",
+            )
+            if key in config and config[key] is not None
+        })
+    # Use the approved logo geometry even for batches saved with older defaults.
+    normalized.update({
+        "logo_width_ratio": SEEZO_WATERMARK_WIDTH_RATIO,
+        "logo_left_ratio": SEEZO_WATERMARK_LEFT_RATIO,
+        "logo_top_ratio": SEEZO_WATERMARK_TOP_RATIO,
+    })
+    normalized["legacy_text_ignored"] = True
+    return normalized
+
+
+def ensure_watermark_config_schema(conn) -> None:
+    """Add explicit SEEZO settings to databases created before this renderer.
+
+    Legacy text/tile columns remain for request and database compatibility, but
+    these fields document the settings used by the only watermark renderer.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(watermark_configs)")}
+    columns = {
+        "renderer": "TEXT NOT NULL DEFAULT 'seezo_logo'",
+        "logo_asset": "TEXT NOT NULL DEFAULT 'static/seezo-watermark.png'",
+        "logo_width_ratio": "REAL NOT NULL DEFAULT 0.2",
+        "logo_left_ratio": "REAL NOT NULL DEFAULT 0.0",
+        "logo_top_ratio": "REAL NOT NULL DEFAULT 0.02",
+    }
+    for name, declaration in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE watermark_configs ADD COLUMN {name} {declaration}")
+
 
 def save_real_slot_image(
     raw_bytes: bytes,
@@ -199,15 +248,8 @@ def save_real_slot_image(
 
     img.save(RAW_IMAGES_DIR / raw_filename, format="PNG")
 
-    wm = watermark_cfg or DEFAULT_WATERMARK
-    preview_img = apply_watermark(
-        img,
-        main_text=wm.get("main_text", DEFAULT_WATERMARK["main_text"]),
-        repeat_text=wm.get("repeat_text", DEFAULT_WATERMARK["repeat_text"]),
-        opacity=float(wm.get("opacity", 0.22)),
-        font_size=int(wm.get("font_size", 32)),
-        position=wm.get("position", "bottom_right")
-    )
+    wm = watermark_config(watermark_cfg)
+    preview_img = apply_watermark(img, watermark_cfg=wm)
     preview_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
     preview_img.save(PREVIEW_IMAGES_DIR / preview_filename, format="JPEG", quality=88)
     return raw_filename, preview_filename
@@ -243,15 +285,8 @@ def save_mock_slot_image(
     raw_img.save(raw_abs_path, format="PNG")
 
     # 预览图打上预览水印并轻量压缩
-    wm = watermark_cfg or DEFAULT_WATERMARK
-    preview_img = apply_watermark(
-        raw_img,
-        main_text=wm.get("main_text", DEFAULT_WATERMARK["main_text"]),
-        repeat_text=wm.get("repeat_text", DEFAULT_WATERMARK["repeat_text"]),
-        opacity=float(wm.get("opacity", 0.22)),
-        font_size=int(wm.get("font_size", 32)),
-        position=wm.get("position", "bottom_right")
-    )
+    wm = watermark_config(watermark_cfg)
+    preview_img = apply_watermark(raw_img, watermark_cfg=wm)
     # 缩小适度提高网页传输效率（如 800x800）
     preview_img_resized = preview_img.resize((800, 800), Image.Resampling.LANCZOS)
     preview_img_resized.save(preview_abs_path, format="JPEG", quality=88)

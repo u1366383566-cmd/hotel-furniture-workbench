@@ -222,7 +222,7 @@ def list_batch_designs(
         cur = conn.cursor()
         cur.execute("SELECT id FROM designs WHERE batch_id = ? ORDER BY is_standby ASC, created_at ASC", (batch_id,))
         rows = cur.fetchall()
-        return [_load_design_detail(conn, r["id"], is_admin=user.is_admin) for r in rows]
+        return [_load_design_detail(conn, r["id"], is_admin=user.is_system_admin) for r in rows]
 
 @router.get("/{design_id}", response_model=DesignDetail)
 def get_design_by_id(
@@ -230,7 +230,7 @@ def get_design_by_id(
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     with get_db(immediate=False) as conn:
-        return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+        return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
 @router.post("/{design_id}/review_panorama")
 def review_panorama(
@@ -429,7 +429,7 @@ def review_panorama(
         else:
             raise HTTPException(status_code=400, detail="未知的审核动作")
 
-        return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+        return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
 @router.post("/{design_id}/start_downstream")
 def start_downstream(
@@ -448,9 +448,20 @@ def start_downstream(
         d_row = cur.fetchone()
         if not d_row:
             raise HTTPException(status_code=404, detail="设计不存在")
+        # Unknown results are a hard stop even on an otherwise idempotent retry;
+        # never let a bulk retry hide an unresolved upstream charge/result.
+        unknown = cur.execute("""
+            SELECT 1 FROM tasks t
+            JOIN slot_versions sv ON sv.id=t.slot_version_id
+            WHERE t.design_id=? AND (t.status='unknown' OR sv.process_status='unknown_pending_confirmation' OR sv.is_unknown=1)
+            LIMIT 1
+        """, (design_id,)).fetchone()
+        if unknown:
+            raise HTTPException(status_code=409, detail="设计存在结果未知任务，必须先人工处置")
+
         # 重复启动下游幂等保护：已在生成或已四图就绪，幂等直接返回，严禁重复扣除预算
         if d_row["status"] in ("downstream_generating", "quad_review"):
-            return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+            return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
         if d_row["status"] != "panorama_approved":
             raise HTTPException(status_code=400, detail=f"必须在全景初筛通过后才允许启动下游三图 (当前状态: {d_row['status']})")
@@ -518,7 +529,7 @@ def start_downstream(
             VALUES (?, ?, 'start_downstream', ?, ?, ?)
         """, (f"aud_{uuid.uuid4().hex[:8]}", batch_id, user.user_id, user.role, json.dumps({"design_id": design_id, "based_on_panorama": pano_vid})))
 
-        return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+        return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
 @router.post("/{design_id}/review_quad")
 def review_quad(
@@ -543,7 +554,7 @@ def review_quad(
         design_status = d_row["status"]
 
         if design_status == "archived" and req.action == "archive":
-            return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+            return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
         if design_status in ("archived", "eliminated"):
             raise HTTPException(status_code=400, detail=f"设计已处于 '{design_status}' 状态，不可重复终审！")
         if req.action not in ("archive", "eliminate"):
@@ -620,7 +631,7 @@ def review_quad(
                 VALUES (?, ?, 'quad_final_pass', 'eliminate', ?, ?, ?)
             """, (f"rev_{uuid.uuid4().hex[:8]}", design_id, req.detail_comment, user.user_id, user.role))
             _maybe_wake_standby_design(conn, batch_id, series_id)
-            return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+            return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
         b_row = cur.execute("SELECT is_circuit_broken, status FROM batches WHERE id = ?", (batch_id,)).fetchone()
         if b_row and (b_row["is_circuit_broken"] or b_row["status"] == "paused"):
@@ -693,4 +704,4 @@ def review_quad(
             INSERT INTO reviews (id, design_id, review_stage, action, detail_comment, reviewer_name, reviewer_role)
             VALUES (?, ?, 'quad_final_pass', 'archive', ?, ?, ?)
         """, (f"rev_{uuid.uuid4().hex[:8]}", design_id, req.detail_comment or "四图终审合格归档", user.user_id, user.role))
-        return _load_design_detail(conn, design_id, is_admin=user.is_admin)
+        return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)

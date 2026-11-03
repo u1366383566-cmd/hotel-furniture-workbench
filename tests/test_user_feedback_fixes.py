@@ -9,10 +9,10 @@ import json
 import uuid
 
 import pytest
+from PIL import Image, ImageChops
 
 from backend.app.database import get_db
 from backend.app.watermark_service import apply_watermark
-from PIL import Image
 
 
 def test_redo_modal_function_is_defined():
@@ -59,11 +59,11 @@ def test_leader_can_create_custom_series_and_plan_batch(client):
     assert updated.json()["rule"]["hotel_mood"] == "轻奢度假、温暖精致"
 
 
-def test_create_series_rejects_duplicates_invalid_ids_and_operators(client):
-    forbidden = client.post("/api/system/series_rules", json={
+def test_create_series_rejects_duplicates_and_invalid_ids(client):
+    created_by_operator = client.post("/api/system/series_rules", json={
         "series_id": "op_series", "name": "操作员系列",
     }, headers={"X-User-Role": "operator"})
-    assert forbidden.status_code == 403
+    assert created_by_operator.status_code == 200
 
     created = client.post("/api/system/series_rules", json={
         "series_id": "dup_series", "name": "重复系列",
@@ -93,9 +93,17 @@ def test_create_series_rejects_duplicates_invalid_ids_and_operators(client):
     assert renamed.json()["rule"]["name"] == "现代商务"
 
 
-def test_watermark_tile_cache_does_not_change_output():
+def test_logo_watermark_is_deterministic_and_has_no_legacy_tiling():
     base = Image.new("RGB", (512, 512), (220, 210, 200))
-    first = apply_watermark(base.copy())
-    second = apply_watermark(base.copy())
-    assert list(first.getdata()) == list(second.getdata()), "贴片缓存前后水印渲染必须一致"
-    assert list(first.getdata()) != list(base.convert("RGB").getdata()), "水印必须实际生效"
+    first = apply_watermark(base.copy(), main_text="A", repeat_text="B", position="center")
+    second = apply_watermark(base.copy(), main_text="different", repeat_text="different", position="bottom_left")
+    assert first.tobytes() == second.tobytes(), "legacy text/position fields must not affect SEEZO output"
+
+    # The only changed region is the one logo footprint at the top-left. A
+    # repeated watermark would also change pixels far below this footprint.
+    changed = ImageChops.difference(first, base.convert("RGB")).getbbox()
+    assert changed is not None
+    assert changed[0] == 0
+    assert changed[1] >= 0
+    assert changed[2] <= round(base.width * 418 / 1024)
+    assert changed[3] <= round(base.height * 83 / 1024) + round(round(base.width * 418 / 1024) * 128 / 418)

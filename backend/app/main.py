@@ -1,11 +1,13 @@
 import os
+import re
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from .config import BASE_DIR, MOCK_MODE, ALLOW_REMOTE_NETWORK
 from .database import init_db
@@ -68,6 +70,14 @@ app.include_router(workbench.router)
 
 STATIC_DIR = BASE_DIR / "static"
 
+@app.middleware("http")
+async def static_no_stale_cache(request: Request, call_next):
+    """静态资源始终回源校验（304），避免改版后浏览器继续执行旧脚本。"""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 @app.get("/api/health")
 def health_check():
     return {
@@ -82,9 +92,26 @@ def health_check():
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    _STATIC_REF = re.compile(r'((?:src|href)="/static/[^"?]+)')
+
+    def _static_version(name: str) -> str:
+        """静态资源内容指纹：文件一改，URL 就变，浏览器不会继续用旧缓存。"""
+        try:
+            return hashlib.sha1((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+        except OSError:
+            return "0"
+
     @app.get("/")
     def read_index():
         index_file = STATIC_DIR / "index.html"
-        if index_file.exists():
-            return FileResponse(index_file)
-        return {"message": "Workbench backend running, static/index.html not found"}
+        if not index_file.exists():
+            return {"message": "Workbench backend running, static/index.html not found"}
+        html = index_file.read_text(encoding="utf-8")
+
+        def _with_version(match: re.Match) -> str:
+            name = match.group(1).rsplit("/", 1)[-1]
+            return f'{match.group(1)}?v={_static_version(name)}'
+
+        html = _STATIC_REF.sub(_with_version, html)
+        return Response(content=html, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})

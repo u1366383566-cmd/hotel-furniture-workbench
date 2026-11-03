@@ -7,6 +7,7 @@ from PIL import Image
 from fastapi import APIRouter, Depends, HTTPException, status
 from ..database import get_db
 from ..config import DEFAULT_WATERMARK, RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
+from ..watermark_service import ensure_watermark_config_schema, watermark_config
 from ..models import WatermarkConfigRequest, CleanupRunRequest, UnknownTaskResolveRequest, SeriesCreateRequest, SeriesGenerateRequest, ImageApiConfigRequest, TextApiConfigRequest
 from ..security import UserContext, get_current_user, require_roles
 from ..cleanup_service import run_protected_cleanup
@@ -52,7 +53,7 @@ def get_series_rules(
 @router.post("/series_rules/generate")
 def generate_series_from_style(
     req: SeriesGenerateRequest,
-    user: UserContext = Depends(require_roles(["leader", "admin"]))
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     """AI 风格规划：一句话风格方向 → LLM 补全整套系列规则 → 自动创建系列。
     规划成本记 planning_model 账本（与生图额度分离）；生图仍走完整批次人工审图流程。"""
@@ -101,7 +102,7 @@ def generate_series_from_style(
 @router.post("/series_rules")
 def add_series_rule(
     req: SeriesCreateRequest,
-    user: UserContext = Depends(require_roles(["leader", "admin"]))
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     """负责人自定义新增产品系列（结构化规则即提示词来源）"""
     with get_db(immediate=True) as conn:
@@ -125,14 +126,14 @@ def add_series_rule(
 def update_series_rule(
     series_id: str,
     rules: Dict[str, Any],
-    user: UserContext = Depends(require_roles(["leader", "admin"]))
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     """负责人配置并更新产品系列规则库；每次修订生成新的规划模板版本"""
     with get_db(immediate=True) as conn:
         try:
             rule = apply_series_rule_update(conn, series_id, rules, user.user_id)
-        except ValueError:
-            raise HTTPException(status_code=404, detail="系列不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=404 if str(exc) == 'series not found' else 400, detail="系列不存在" if str(exc) == 'series not found' else str(exc))
 
         conn.execute("""
             INSERT INTO audit_logs (id, action, actor_name, actor_role, detail)
@@ -234,13 +235,17 @@ def get_watermark_config(
     batch_id: str,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
-    with get_db(immediate=False) as conn:
+    with get_db(immediate=True) as conn:
+        ensure_watermark_config_schema(conn)
         cur = conn.cursor()
-        cur.execute("SELECT main_text, repeat_text, opacity, font_size, position, updated_by, updated_at FROM watermark_configs WHERE batch_id = ?", (batch_id,))
+        cur.execute("""
+            SELECT renderer, logo_asset, logo_width_ratio, logo_left_ratio, logo_top_ratio,
+                   main_text, repeat_text, opacity, font_size, position, updated_by, updated_at
+            FROM watermark_configs WHERE batch_id = ?
+        """, (batch_id,))
         row = cur.fetchone()
-        if not row:
-            return DEFAULT_WATERMARK
-        return dict(row)
+        return {**watermark_config(dict(row) if row else None),
+                **({"updated_by": row["updated_by"], "updated_at": row["updated_at"]} if row else {})}
 
 @router.post("/batches/{batch_id}/watermark")
 def update_watermark_config(
@@ -249,35 +254,55 @@ def update_watermark_config(
     user: UserContext = Depends(require_roles(["leader", "admin"]))
 ):
     with get_db(immediate=True) as conn:
+        ensure_watermark_config_schema(conn)
+        # Accept legacy text fields from the existing UI/API contract, but store
+        # explicit logo settings and make clear that text values are ignored.
         conn.execute("""
             INSERT INTO watermark_configs (
-                id, batch_id, main_text, repeat_text, opacity, font_size, position, updated_by, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                id, batch_id, main_text, repeat_text, opacity, font_size, position,
+                renderer, logo_asset, logo_width_ratio, logo_left_ratio, logo_top_ratio,
+                updated_by, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
             ON CONFLICT(batch_id) DO UPDATE SET
                 main_text = excluded.main_text,
                 repeat_text = excluded.repeat_text,
                 opacity = excluded.opacity,
                 font_size = excluded.font_size,
                 position = excluded.position,
+                renderer = excluded.renderer,
+                logo_asset = excluded.logo_asset,
+                logo_width_ratio = excluded.logo_width_ratio,
+                logo_left_ratio = excluded.logo_left_ratio,
+                logo_top_ratio = excluded.logo_top_ratio,
                 updated_by = excluded.updated_by,
                 updated_at = datetime('now', 'localtime')
         """, (
             f"wm_{uuid.uuid4().hex[:8]}", batch_id, req.main_text, req.repeat_text,
-            req.opacity, req.font_size, req.position, user.user_id
+            req.opacity, req.font_size, req.position,
+            DEFAULT_WATERMARK["renderer"], DEFAULT_WATERMARK["logo_asset"],
+            DEFAULT_WATERMARK["logo_width_ratio"], DEFAULT_WATERMARK["logo_left_ratio"],
+            DEFAULT_WATERMARK["logo_top_ratio"], user.user_id
         ))
 
         conn.execute("""
             INSERT INTO audit_logs (id, batch_id, action, actor_name, actor_role, detail)
             VALUES (?, ?, 'update_watermark', ?, ?, ?)
-        """, (f"aud_{uuid.uuid4().hex[:8]}", batch_id, user.user_id, user.role, json.dumps(req.model_dump())))
+        """, (f"aud_{uuid.uuid4().hex[:8]}", batch_id, user.user_id, user.role, json.dumps({
+            **req.model_dump(), "renderer": DEFAULT_WATERMARK["renderer"],
+            "logo_asset": DEFAULT_WATERMARK["logo_asset"],
+            "legacy_text_ignored": True,
+        })))
 
-    return {"message": "水印配置已更新", "config": req.model_dump()}
+    return {"message": "SEEZO 图标水印配置已更新（兼容字段仅作记录，不参与渲染）",
+            "config": {**watermark_config(req.model_dump()), "legacy_text_ignored": True}}
 
 @router.post("/cleanup")
 def trigger_protected_cleanup(
     req: CleanupRunRequest,
     user: UserContext = Depends(require_roles(["admin"]))
 ):
+    # Legacy leader is accepted through the admin capability dependency.  Raw
+    # image access is intentionally narrower because it is an export boundary.
     with get_db(immediate=True) as conn:
         result = run_protected_cleanup(conn, days_threshold=req.days_threshold)
         conn.execute("""

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>酒店家具智能套图工作台 | 视觉设计闭环</title>
+  <title>SEEZO 视觉工作台 | 酒店家具套图</title>
   <link rel="stylesheet" href="/static/tailwind-lite.css">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
@@ -15,17 +15,15 @@
 
       <!-- Logo 与标题 -->
       <div class="flex items-center gap-3 min-w-0">
-        <div class="logo-square grad-btn shrink-0">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-            <path d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-          </svg>
+        <div class="logo-square grad-btn shrink-0" aria-hidden="true">
+          <span>SEEZO</span>
         </div>
         <div class="min-w-0">
           <div class="flex items-center gap-2">
-            <h1 class="text-[15px] font-black text-inkTitle tracking-tight whitespace-nowrap">酒店家具智能套图工作台</h1>
-            <span class="mock-chip"><span class="dot-pulse"></span>本地 Mock 闭环</span>
+            <h1 class="text-[15px] font-black text-inkTitle tracking-tight whitespace-nowrap">SEEZO 视觉工作台</h1>
+            <span class="mock-chip"><span class="dot-pulse"></span>本地工作区</span>
           </div>
-          <p class="hidden md:block text-[11px] text-inkMuted">非生产证明 · 专注酒店定制视觉方案与四图终审</p>
+          <p class="hidden md:block text-[11px] text-inkMuted">酒店家具视觉生产 · 以图为先，快速完成审核与交付</p>
         </div>
       </div>
 
@@ -39,11 +37,12 @@
             </select>
           </div>
         </div>
-        <button id="btn-new-batch" class="wb-btn wb-btn-ghost shrink-0">+ 新建批次</button>
-        <div class="seg shrink-0" role="group" aria-label="切换模拟角色">
-          <button class="role-btn seg-btn seg-active" data-role="operator">操作员</button>
-          <button class="role-btn seg-btn" data-role="leader">负责人</button>
+        <button id="btn-new-batch" class="wb-btn wb-btn-grad shrink-0">+ 新建任务</button>
+        <div class="role-switch" role="group" aria-label="当前工作角色">
+          <span class="role-switch-label">身份</span>
+          <button class="role-btn seg-btn seg-active" data-role="operator">操作员 · 美工</button>
           <button class="role-btn seg-btn" data-role="admin">管理员</button>
+          <button class="role-btn seg-btn role-legacy" data-role="leader" title="兼容旧负责人身份，等同管理员">负责人（兼容）</button>
         </div>
       </div>
 
@@ -53,6 +52,10 @@
   <!-- 主容器 -->
   <main class="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 flex-1 w-full space-y-5">
 
+    <section class="quota-hero" aria-label="上游生图额度">
+      <div><span class="quota-eyebrow">IMAGE GENERATION</span><h2>上游额度汇总</h2><p>未禁用账号的额度汇总；部分账号可能因限流或异常暂不可用。</p></div>
+      <div class="quota-reading"><strong id="upstream-quota-value">加载中</strong><span id="upstream-quota-time" aria-live="polite">正在查询</span><button id="upstream-quota-refresh" class="quota-refresh" type="button">刷新额度</button></div>
+    </section>
     <!-- 批次状态 & 预算仪表盘 -->
     <section class="wb-card p-5">
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-lineLight">
@@ -76,8 +79,15 @@
         </div>
       </div>
 
-      <!-- 主预算水位 + 次级指标 -->
-      <div class="pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+      <div class="workbench-stats" aria-label="任务统计">
+        <div><span>今日新建任务</span><strong id="today-tasks">0</strong></div>
+        <div><span>今日验收组数</span><strong id="today-archived">0</strong></div>
+        <div><span>还需归档</span><strong id="metric-remaining">0</strong></div>
+        <div><span>待审核全景</span><strong id="metric-pending">0</strong></div>
+        <div><span>本任务生图可用额度</span><strong id="task-quota">—</strong><small id="task-quota-status">请选择任务</small></div>
+      </div>
+      <!-- 管理员预算面板，由初始化脚本放到管理中心 -->
+      <div id="admin-budget-metrics" class="pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
         <div class="lg:col-span-7 min-w-0">
           <div class="flex items-end justify-between gap-3">
             <div>
@@ -104,9 +114,9 @@
           </div>
 
           <div class="mt-3 flex items-center gap-2 flex-wrap">
-            <button id="btn-approve-warning" class="wb-btn wb-btn-amber hidden" title="仅负责人可特批">批准越过预警线</button>
+            <button id="btn-approve-warning" class="wb-btn wb-btn-amber hidden" title="仅管理员可特批（负责人兼容）">批准越过预警线</button>
             <button id="btn-recover-circuit" class="wb-btn wb-btn-danger hidden">恢复熔断并试运行</button>
-            <button id="btn-start-batch" class="wb-btn wb-btn-soft-blue hidden">启动首发全景 (Leader)</button>
+            <button id="btn-start-batch" class="wb-btn wb-btn-soft-blue hidden">启动首发全景（管理员）</button>
           </div>
         </div>
 
@@ -126,32 +136,88 @@
     <!-- 业务工作台导航 (胶囊分段) -->
     <nav class="wb-nav-wrap" aria-label="工作台分区导航">
       <div class="seg">
-        <button class="tab-btn seg-btn seg-active" data-tab="panorama">全景初筛区 <span id="badge-pano-count" class="tab-badge">0</span></button>
-        <button class="tab-btn seg-btn" data-tab="quad">四图终审区 <span id="badge-quad-count" class="tab-badge">0</span></button>
-        <button class="tab-btn seg-btn" data-tab="standby">候补备选池 <span id="badge-standby-count" class="tab-badge">0</span></button>
-        <button class="tab-btn seg-btn" data-tab="archived">已归档与导出 <span id="badge-archived-count" class="tab-badge">0</span></button>
-        <button class="tab-btn seg-btn" data-tab="system">未知保护与系统设置</button>
+        <button class="tab-btn seg-btn seg-active" data-tab="panorama">全景 <span id="badge-pano-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="quad">四图 <span id="badge-quad-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn hidden" data-tab="standby">候补备选池 <span id="badge-standby-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn" data-tab="styles">风格系列</button>
+        <button class="tab-btn seg-btn" data-tab="archived">已完成 <span id="badge-archived-count" class="tab-badge">0</span></button>
+        <button class="tab-btn seg-btn hidden" data-tab="system">管理中心</button>
       </div>
     </nav>
 
+    <div id="bulk-results" class="workbench-notice hidden" role="status"></div>
     <!-- 选项卡内容区 -->
     <div id="tab-content">
 
+      <div id="tab-panel-styles" class="space-y-4 hidden">
+        <div class="section-intro"><div><p class="eyebrow">STYLE LIBRARY</p><h2>风格系列</h2><p>设计并维护系列风格，保存后可在新任务中使用。</p></div><button id="style-new" class="wb-btn wb-btn-dark" type="button">+ 新建风格</button></div>
+        <div id="style-cards" class="style-grid"></div>
+        <div id="style-editor" class="hidden">        <!-- 系列规则 -->
+        <div class="wb-card p-5">
+          <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-inkTitle">编辑系列规则</h3>
+              <p class="text-xs text-inkMuted mt-0.5">保存后生成新模板版本；仅影响后续新任务，已创建设计继续冻结在原版本。</p>
+            </div>
+            <div class="w-44 shrink-0">
+              <select id="series-rule-select" aria-label="选择系列规则">
+                <option value="modern_business">现代商务</option>
+                <option value="natural_wood">自然木质</option>
+                <option value="soft_contemporary">柔和当代</option>
+              </select>
+            </div>
+          </div>
+          <div class="style-fields">
+            <label>系列名称<input id="style-name" class="wb-input" type="text"></label>
+            <label>风格方向<textarea id="style-description" class="wb-input" rows="2"></textarea></label>
+            <label>材质（每行一项）<textarea id="style-materials" class="wb-input" rows="3"></textarea></label>
+            <label>配色（每行一项）<textarea id="style-colors" class="wb-input" rows="3"></textarea></label>
+          </div>
+          <details class="workbench-details"><summary>高级规则（JSON）</summary><textarea id="series-rule-json" aria-label="系列规则 JSON" rows="9" class="wb-input font-mono leading-relaxed"></textarea></details>
+          <div class="flex items-center justify-between mt-2 gap-3 flex-wrap">
+            <span id="series-template-version" class="text-[11px] text-inkMuted">模板版本加载中</span>
+            <button id="btn-save-series-rule" class="wb-btn wb-btn-dark">保存规则修订</button>
+          </div>
+          <div class="mt-3 pt-3 border-t border-lineLight">
+            <div class="flex items-end gap-2 flex-wrap mb-3">
+              <div class="flex-1"><label for="ai-style-brief" class="block text-xs mb-1">用一句话创建风格系列</label><input id="ai-style-brief" aria-label="AI 系列风格方向" class="wb-input" placeholder="例如：温暖自然的精品酒店，浅木与亚麻"></div>
+              <button id="btn-ai-generate-series" class="wb-btn wb-btn-dark">AI 生成新系列</button>
+            </div>
+            <div class="flex items-end gap-2 flex-wrap">
+              <div class="flex-1 min-w-[10rem]">
+                <label class="block text-[11px] text-inkBody mb-1.5">新系列英文标识</label>
+                <input type="text" id="new-series-id" aria-label="新系列英文标识" placeholder="如 luxury_wood（小写字母开头）" class="wb-input">
+              </div>
+              <div class="flex-1 min-w-[10rem]">
+                <label class="block text-[11px] text-inkBody mb-1.5">新系列中文名</label>
+                <input type="text" id="new-series-name" aria-label="新系列中文名" placeholder="如 轻奢木质" class="wb-input">
+              </div>
+              <button id="btn-add-series" class="wb-btn wb-btn-grad shrink-0">+ 新增系列</button>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-1.5">新系列会出现在创建任务的可选系列里。</p>
+          </div>
+        </div>
+
+        </div>
+      </div>
+
       <!-- 1. 全景初筛区 -->
       <div id="tab-panel-panorama" class="space-y-4">
+        <div class="section-intro"><div><p class="eyebrow">01 / PANORAMA</p><h2>全景审核</h2><p>先看图，再看提示词。通过后自动进入四图制作。</p></div><button id="btn-refresh-designs" class="wb-btn wb-btn-ghost">刷新列表</button></div>
+        <div id="planning-job-notice" class="workbench-notice hidden" role="status"></div>
+        <div id="panorama-bulk" class="bulk-toolbar hidden"><label for="panorama-select-all"><input type="checkbox" id="panorama-select-all"> 全选待审核</label><span id="panorama-selected-count">已选 0 款</span><button id="panorama-bulk-approve" class="wb-btn wb-btn-dark">通过并生成白底图</button></div>
         <div id="plan-start-hint" class="plan-start-hint hidden" role="status">
-          <div><strong>方案已确认，等待启动全景</strong><p>当前还没有派发生图任务；负责人核对预算后，点击下方按钮开始生成正式款。</p></div>
+          <div><strong>方案已确认，等待启动全景</strong><p>当前还没有派发生图任务；管理员核对预算后，点击下方按钮开始生成正式款。</p></div>
           <button id="btn-start-from-plans" class="wb-btn wb-btn-grad">启动首发全景</button>
         </div>
         <section id="smart-planning-panel" class="wb-card p-5 space-y-4 hidden">
-          <div><h3 id="plan-panel-title" class="text-sm font-bold text-inkTitle">生图前设计规划</h3><p id="plan-panel-description" class="text-xs text-inkMuted">先生成并审核正式款与候补款，核对相似提醒后由负责人确认；确认后再启动全景。</p></div>
+          <div><h3 id="plan-panel-title" class="text-sm font-bold text-inkTitle">生图前设计规划</h3><p id="plan-panel-description" class="text-xs text-inkMuted">先生成并审核正式款与候补款，核对相似提醒后由管理员确认；确认后再启动全景。</p></div>
           <div class="flex gap-2"><button id="btn-plan-all" class="wb-btn wb-btn-dark">规划未完成方案</button><button id="btn-plan-confirm" class="wb-btn wb-btn-grad">确认全部方案</button></div>
           <p id="plan-progress" class="text-xs text-inkMuted" aria-live="polite"></p>
           <div id="planning-cards" class="space-y-3"></div>
         </section>
         <div class="flex items-center justify-between gap-3 text-xs text-inkMuted">
           <p class="min-w-0">第一阶段审核：评估空间透视、床体及背板比例、材质与系列协调性。通过后锁定全景作为下游视觉基准。</p>
-          <button id="btn-refresh-designs" class="text-primary-600 hover:text-primary-700 hover:underline whitespace-nowrap shrink-0 text-xs">刷新列表</button>
         </div>
         <div id="panorama-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           <!-- 动态渲染全景卡片 -->
@@ -160,6 +226,8 @@
 
       <!-- 2. 四图终审区 -->
       <div id="tab-panel-quad" class="space-y-5 hidden">
+        <div class="section-intro"><div><p class="eyebrow">02 / QUAD</p><h2>四图验收</h2><p>对照统一视角与材质，确认一组完整交付图。</p></div></div>
+        <div id="quad-bulk" class="bulk-toolbar hidden"><label for="quad-select-all"><input type="checkbox" id="quad-select-all"> 全选待验收</label><span id="quad-selected-count">已选 0 组</span><button id="quad-bulk-archive" class="wb-btn wb-btn-dark">批量验收</button></div>
         <div class="text-xs text-inkMuted">
           四图终审对照：全景通过后由人工启动下游三图生成；四图就绪后对照终审，合格一键归档，支持单张重做与版本回选。
         </div>
@@ -172,9 +240,9 @@
       <div id="tab-panel-standby" class="space-y-4 hidden">
         <div class="flex items-center justify-between gap-3">
           <p class="text-xs text-inkMuted min-w-0">
-            首发设计淘汰或产生缺口时，系统按原批准规则自动按序唤醒候补并派发全景任务。候补耗尽后负责人可追加候补。
+            首发设计淘汰或产生缺口时，系统按原批准规则自动按序唤醒候补并派发全景任务。候补耗尽后管理员可追加候补。
           </p>
-          <button id="btn-append-standby" class="wb-btn wb-btn-soft-blue shrink-0">+ 追加候补方案 (Leader)</button>
+          <button id="btn-append-standby" class="wb-btn wb-btn-soft-blue shrink-0">+ 追加候补方案（管理员）</button>
         </div>
         <div id="standby-cards-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           <!-- 动态渲染候补卡片 -->
@@ -183,6 +251,8 @@
 
       <!-- 4. 已归档与导出 -->
       <div id="tab-panel-archived" class="space-y-4 hidden">
+        <div class="section-intro"><div><p class="eyebrow">03 / COMPLETED</p><h2>已完成</h2><p>归档成果集中在这里，可单款或批量导出。</p></div><div class="watermark-preview"><span>导出水印</span><img src="/static/seezo-watermark.png" alt="SEEZO 水印预览"></div></div>
+        <div id="export-selection" class="bulk-toolbar hidden"><label for="export-select-all"><input type="checkbox" id="export-select-all"> 全选已完成</label><span id="export-selected-count">已选 0 组</span><button id="export-selected" class="wb-btn wb-btn-dark">导出所选</button></div>
         <div class="flex items-center justify-between gap-3 wb-card p-4">
           <div class="min-w-0">
             <h3 class="text-sm font-bold text-inkTitle">批次归档套图打包</h3>
@@ -206,9 +276,11 @@
 
       <!-- 5. 未知保护与系统设置 -->
       <div id="tab-panel-system" class="space-y-5 hidden">
+        <div class="section-intro"><div><p class="eyebrow">ADMIN / CONTROL</p><h2>管理中心</h2><p>额度、模型、系列规则与异常任务的集中控制台。</p></div></div>
+        <div class="wb-card p-5"><h3 class="text-sm font-bold">任务额度与用量</h3><div id="admin-budget-panel"></div><div class="settings-inline"><label for="budget-per-warning">每组预警次数 <input id="budget-per-warning" class="wb-input" type="number" min="1" value="5"></label><label for="budget-per-hard">每组硬上限 <input id="budget-per-hard" class="wb-input" type="number" min="2" value="6"></label><button id="budget-settings-save" class="wb-btn wb-btn-dark">保存默认额度</button></div></div>
 
         <div class="wb-card p-5 space-y-3">
-          <div><h3 class="text-sm font-bold text-inkTitle">文本规划模型 (Leader / Admin)</h3>
+          <div><h3 class="text-sm font-bold text-inkTitle">文本规划模型 （管理员 / 负责人兼容）</h3>
             <p class="text-xs text-inkMuted mt-0.5">独立配置风格规划所用的文本模型，兼容 /v1/chat/completions。</p></div>
           <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5">
             <div><label for="cfg-text-url">服务地址</label><input id="cfg-text-url" class="wb-input" placeholder="http://127.0.0.1:3000"></div>
@@ -216,7 +288,7 @@
             <div><label for="cfg-text-timeout">超时秒数</label><input id="cfg-text-timeout" class="wb-input" type="number" min="5" max="900" value="180"></div>
           </div>
           <label for="cfg-text-key">API 密钥（留空保留已有密钥）</label>
-          <input id="cfg-text-key" type="password" autocomplete="new-password" class="wb-input">
+          <input id="cfg-text-key" type="password" aria-label="文本模型 API 密钥" autocomplete="new-password" class="wb-input">
           <div id="cfg-text-status" class="text-xs text-inkMuted"></div>
           <button id="btn-text-save" class="wb-btn wb-btn-dark">保存文本模型配置</button>
         </div>
@@ -226,7 +298,7 @@
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="min-w-0">
               <h3 class="text-sm font-bold text-inkTitle flex items-center gap-2">
-                生图上游 API (Leader / Admin)
+                生图上游 API （管理员 / 负责人兼容）
                 <span id="cfg-api-mode-badge" class="wb-badge wb-badge-slate">Mock 模式</span>
               </h3>
               <p class="text-xs text-inkMuted mt-0.5">对接 OpenAI 兼容生图反代（/v1/images/generations）。启用后预算红线、失败分类、unknown 保护全部继续生效。</p>
@@ -273,46 +345,6 @@
           </div>
         </div>
 
-        <!-- 系列规则 -->
-        <div class="wb-card p-5">
-          <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-            <div class="min-w-0">
-              <h3 class="text-sm font-bold text-inkTitle">系列规则与规划模板版本 (Leader / Admin)</h3>
-              <p class="text-xs text-inkMuted mt-0.5">保存后生成新模板版本；仅影响后续规划，已创建设计继续冻结在原版本。</p>
-            </div>
-            <div class="w-44 shrink-0">
-              <select id="series-rule-select" aria-label="选择系列规则">
-                <option value="modern_business">现代商务</option>
-                <option value="natural_wood">自然木质</option>
-                <option value="soft_contemporary">柔和当代</option>
-              </select>
-            </div>
-          </div>
-          <textarea id="series-rule-json" aria-label="系列规则 JSON" rows="9" class="wb-input font-mono leading-relaxed"></textarea>
-          <div class="flex items-center justify-between mt-2 gap-3 flex-wrap">
-            <span id="series-template-version" class="text-[11px] text-inkMuted">模板版本加载中</span>
-            <button id="btn-save-series-rule" class="wb-btn wb-btn-dark">保存规则修订</button>
-          </div>
-          <div class="mt-3 pt-3 border-t border-lineLight">
-            <div class="flex items-end gap-2 flex-wrap mb-3">
-              <div class="flex-1"><label for="ai-style-brief" class="block text-xs mb-1">用一句话创建风格系列</label><input id="ai-style-brief" class="wb-input" placeholder="例如：温暖自然的精品酒店，浅木与亚麻"></div>
-              <button id="btn-ai-generate-series" class="wb-btn wb-btn-dark">AI 生成新系列</button>
-            </div>
-            <div class="flex items-end gap-2 flex-wrap">
-              <div class="flex-1 min-w-[10rem]">
-                <label class="block text-[11px] text-inkBody mb-1.5">新系列英文标识</label>
-                <input type="text" id="new-series-id" aria-label="新系列英文标识" placeholder="如 luxury_wood（小写字母开头）" class="wb-input">
-              </div>
-              <div class="flex-1 min-w-[10rem]">
-                <label class="block text-[11px] text-inkBody mb-1.5">新系列中文名</label>
-                <input type="text" id="new-series-name" aria-label="新系列中文名" placeholder="如 轻奢木质" class="wb-input">
-              </div>
-              <button id="btn-add-series" class="wb-btn wb-btn-grad shrink-0">+ 新增系列</button>
-            </div>
-            <p class="text-[11px] text-slate-400 mt-1.5">新增系列默认沿用内置规则模板，编辑上方 JSON 后点"保存规则修订"即可定制；新系列会出现在创建批次的可选系列里。</p>
-          </div>
-        </div>
-
         <!-- 结果未知处置中心 -->
         <div class="wb-card p-5">
           <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
@@ -334,19 +366,19 @@
         <!-- 水印配置 + 清理保护 -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div class="wb-card p-5 space-y-3">
-            <h3 class="text-sm font-bold text-inkTitle">水印参数配置 (Leader / Admin)</h3>
+            <h3 class="text-sm font-bold text-inkTitle">水印参数配置 （管理员 / 负责人兼容）</h3>
             <div class="space-y-2.5 text-xs">
               <div>
-                <label class="block text-inkBody font-medium mb-1.5" for="cfg-main-wm">主品牌水印文本</label>
+                <label class="block text-inkBody font-medium mb-1.5" for="cfg-main-wm">SEEZO 标识（固定素材）</label>
                 <input type="text" id="cfg-main-wm" aria-label="主品牌水印文本" class="wb-input">
               </div>
               <div>
-                <label class="block text-inkBody font-medium mb-1.5" for="cfg-repeat-wm">平铺轻量防盗文本</label>
+                <label class="block text-inkBody font-medium mb-1.5" for="cfg-repeat-wm">旧文本设置（兼容保留，不参与渲染）</label>
                 <input type="text" id="cfg-repeat-wm" aria-label="平铺轻量防盗文本" class="wb-input">
               </div>
               <div class="grid grid-cols-2 gap-2">
                 <div>
-                  <label class="block text-inkBody font-medium mb-1.5" for="cfg-opacity-wm">透明度 (0.05-0.9)</label>
+                  <label class="block text-inkBody font-medium mb-1.5" for="cfg-opacity-wm">旧透明度（兼容保留）</label>
                   <input type="number" id="cfg-opacity-wm" aria-label="水印透明度" step="0.05" min="0.05" max="0.9" class="wb-input">
                 </div>
                 <div>
@@ -446,11 +478,11 @@
           <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-name">批次名称</label>
           <input type="text" id="new-batch-name" aria-label="批次名称" class="wb-input" value="2026Q4 酒店定制首轮规划小样">
         </div>
-        <div>
+        <div class="hidden">
           <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-target">目标归档组数</label>
           <input type="number" id="new-batch-target" aria-label="目标归档组数" required class="wb-input" placeholder="请输入目标组数" min="1" max="50">
         </div>
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-2 gap-3 hidden">
           <div>
             <label class="block text-inkBody font-semibold mb-1.5" for="new-batch-warning">预警线 (次)</label>
             <input type="number" id="new-batch-warning" aria-label="预算预警线" required class="wb-input" placeholder="必须显式填写">
@@ -469,14 +501,14 @@
             <div class="text-inkMuted">系列列表加载中...</div>
           </div>
         </div>
-        <div><label for="new-batch-brief" class="block text-inkBody font-semibold mb-1.5">风格偏好与禁忌</label><textarea id="new-batch-brief" class="wb-input" rows="3" placeholder="例如：深色木纹，温暖商务氛围，避免雕花"></textarea></div>
+        <div><label for="new-batch-brief" class="block text-inkBody font-semibold mb-1.5">风格偏好与禁忌</label><textarea id="new-batch-brief" aria-label="任务风格偏好与禁忌" class="wb-input" rows="3" placeholder="例如：深色木纹，温暖商务氛围，避免雕花"></textarea></div>
         <div class="p-2.5 bg-blue-50 border border-blue-100 rounded-xl text-blue-700 text-xs">
-          创建后先规划并确认正式款和候补款，不会自动生图。
+          系统将自动规划各款并生成全景；完成后可在全景审核区检查图片。
         </div>
       </div>
       <div class="flex justify-end gap-2 pt-1">
         <button id="btn-cancel-new-batch" class="wb-btn wb-btn-ghost">取消</button>
-        <button id="btn-submit-new-batch" class="wb-btn wb-btn-grad">创建并进入方案规划</button>
+        <button id="btn-submit-new-batch" class="wb-btn wb-btn-grad">创建任务并开始</button>
       </div>
     </div>
   </div>
@@ -488,5 +520,6 @@
 
   <script src="/static/app.js"></script>
   <script src="/static/smart-planning.js"></script>
+  <script src="/static/workbench.js"></script>
 </body>
 </html>

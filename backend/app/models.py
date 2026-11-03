@@ -7,13 +7,18 @@ class BatchCreateRequest(BaseModel):
     target_archived_count: int = Field(default=3, ge=1, le=50, description="批次目标归档组数")
     designs_per_series: int = Field(default=2, ge=1, le=10, description="首轮每系列规划设计数")
     standby_designs_per_series: int = Field(default=1, ge=0, le=10, description="每系列候补设计数")
-    warning_budget: int = Field(default=20, ge=1)
-    hard_limit_budget: int = Field(default=25, ge=1)
+    warning_budget: Optional[int] = Field(default=None, ge=1)
+    hard_limit_budget: Optional[int] = Field(default=None, ge=1)
     auto_start_panorama: bool = Field(default=True, description="是否自动开始首发全景生成")
     smart_planning: bool = False
     auto_workflow: bool = False
     planning_brief: str = Field(default="", max_length=2000)
-    series_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    # Per-series primary/standby counts.  ``preference`` is accepted inside a
+    # series entry for clients that submit counts and copy together.
+    series_counts: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    series_preferences: Dict[str, str] = Field(default_factory=dict)
+    # ``preferences`` is a compatibility spelling used by early SEEZO clients.
+    preferences: Dict[str, str] = Field(default_factory=dict)
 
 class BatchResponse(BaseModel):
     id: str
@@ -35,6 +40,8 @@ class BatchResponse(BaseModel):
     smart_planning: bool = False
     planning_confirmed: bool = False
     auto_workflow: bool = False
+    series_counts: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    series_preferences: Dict[str, str] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -163,11 +170,18 @@ class TextApiConfigRequest(BaseModel):
 
 
 class WatermarkConfigRequest(BaseModel):
-    main_text: str = Field(..., min_length=2, max_length=100)
-    repeat_text: str = Field(..., min_length=2, max_length=100)
-    opacity: float = Field(default=0.22, ge=0.05, le=0.9)
-    font_size: int = Field(default=36, ge=12, le=72)
-    position: str = Field(default="bottom_right")
+    # Legacy text fields remain optional for old clients; rendering is always
+    # performed by the SEEZO logo renderer.
+    main_text: str = Field(default="", max_length=100)
+    repeat_text: str = Field(default="", max_length=100)
+    opacity: float = Field(default=1.0, ge=0.05, le=1.0)
+    font_size: int = Field(default=36, ge=1, le=72)
+    position: str = Field(default="top_left")
+    renderer: str = Field(default="seezo_logo", max_length=40)
+    logo_asset: Optional[str] = Field(default=None, max_length=300)
+    logo_width_ratio: float = Field(default=0.20, gt=0.0, le=1.0)
+    logo_left_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    logo_top_ratio: float = Field(default=0.02, ge=0.0, le=1.0)
 
 class UnknownTaskResolveRequest(BaseModel):
     task_id: str
