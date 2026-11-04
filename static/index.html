@@ -65,8 +65,7 @@
             <span id="current-batch-status" class="wb-badge wb-badge-slate">加载中</span>
           </div>
           <p id="current-batch-series" class="text-xs text-inkMuted mt-1 truncate">启用系列: 现代商务 / 自然木质 / 柔和当代</p>
-          <button id="edit-batch-series" class="wb-btn wb-btn-ghost" type="button">编辑任务系列和组数</button>
-          <div id="edit-batch-series-panel" class="hidden"><div id="edit-batch-series-list"></div><button id="save-batch-series" class="wb-btn wb-btn-dark" type="button">保存组数</button><button id="edit-batch-new-style" class="wb-btn wb-btn-ghost" type="button">新建风格</button></div>
+          <button id="edit-batch-series" class="wb-btn wb-btn-ghost batch-edit-trigger" type="button" aria-expanded="false" aria-controls="edit-batch-series-panel">编辑任务系列和组数</button>
         </div>
 
         <!-- 归档目标进度 -->
@@ -79,6 +78,12 @@
             <div id="progress-archived" class="grad-bar h-full w-0 transition-all duration-300"></div>
           </div>
         </div>
+      </div>
+
+      <div id="edit-batch-series-panel" class="batch-series-panel hidden">
+        <div class="batch-series-heading"><div><h3>调整任务组数</h3><p>填写每个系列的总组数，保存后系统只新增增加的部分。</p></div><button id="close-batch-series" class="batch-series-close" type="button" aria-label="关闭组数编辑">×</button></div>
+        <div id="edit-batch-series-list" class="batch-series-list"></div>
+        <div class="batch-series-actions"><button id="save-batch-series" class="wb-btn wb-btn-dark" type="button">保存组数</button><button id="edit-batch-new-style" class="wb-btn wb-btn-ghost" type="button">新建风格</button><span>已有组数和图片会保留</span></div>
       </div>
 
       <div class="workbench-stats" aria-label="任务统计">

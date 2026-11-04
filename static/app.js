@@ -272,7 +272,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('edit-batch-new-style').addEventListener('click', openNewStyle);
   let editingCounts = null;
   let editingBatchId = null;
+  const closeBatchSeries = () => {
+    document.getElementById('edit-batch-series-panel').classList.add('hidden');
+    document.getElementById('edit-batch-series').setAttribute('aria-expanded', 'false');
+  };
+  document.getElementById('close-batch-series').addEventListener('click', closeBatchSeries);
   document.getElementById('edit-batch-series').addEventListener('click', async () => {
+    if (!document.getElementById('edit-batch-series-panel').classList.contains('hidden')) { closeBatchSeries(); return; }
     const batch = state.batches.find(b => b.id === state.currentBatchId);
     if (!batch?.auto_workflow) { showToast('仅自动任务支持编辑组数', true); return; }
     try {
@@ -282,12 +288,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       editingCounts = Object.fromEntries(Object.entries(batch.series_counts).map(([id, value]) => [id, value.primary]));
       const list = document.getElementById('edit-batch-series-list'); list.replaceChildren();
       for (const [id, rule] of Object.entries(rules)) {
-        const label = document.createElement('label'); label.className = 'flex items-center gap-2';
-        const name = document.createElement('span'); name.textContent = rule.name || id;
+        const label = document.createElement('label'); label.className = 'batch-series-row';
+        const name = document.createElement('span'); name.className = 'batch-series-name'; name.textContent = rule.name || id;
         const input = document.createElement('input'); input.type = 'number'; input.min = String(editingCounts[id] || 0); input.max = '30'; input.value = String(editingCounts[id] || 0); input.dataset.seriesId = id; input.className = 'wb-input'; input.setAttribute('aria-label', `${rule.name || id}总组数`);
-        label.append(name, input); list.appendChild(label);
+        const field = document.createElement('span'); field.className = 'batch-series-field';
+        const unit = document.createElement('span'); unit.textContent = '组';
+        field.append(input, unit); label.append(name, field); list.appendChild(label);
       }
       document.getElementById('edit-batch-series-panel').classList.remove('hidden');
+      document.getElementById('edit-batch-series').setAttribute('aria-expanded', 'true');
     } catch (e) { showToast(e.message, true); }
   });
   document.getElementById('save-batch-series').addEventListener('click', async event => {
@@ -299,7 +308,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     event.currentTarget.disabled = true;
     try {
       const result = await apiFetch(`/api/batches/${batchId}/series-counts`, {method:'PUT', body:JSON.stringify({series_counts:counts,expected_series_counts:editingCounts})});
-      document.getElementById('edit-batch-series-panel').classList.add('hidden');
+      closeBatchSeries();
       showToast(result.message); await loadBatches(batchId);
     } catch (e) { showToast(e.message, true); }
     finally { event.currentTarget.disabled = false; }
@@ -796,6 +805,7 @@ async function loadBatches(selectId = null) {
 async function onBatchChanged() {
   const curBatch = state.batches.find(b => b.id === state.currentBatchId);
   document.getElementById('edit-batch-series-panel').classList.add('hidden');
+  document.getElementById('edit-batch-series').setAttribute('aria-expanded', 'false');
   panoramaSimilarityCache.clear();
   const statusEl = document.getElementById('current-batch-status');
   if (curBatch) {

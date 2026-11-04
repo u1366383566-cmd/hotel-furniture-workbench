@@ -278,6 +278,20 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .style-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .style-fields label { display:grid; gap:6px; color:#475569; font-size:12px; }
 .workbench-stats small { color:#718297; font-size:11px; line-height:1.4; }
+.batch-edit-trigger { margin-top: 10px; }
+.batch-series-panel { margin: 18px 0 2px; padding: 20px; border: 1px solid #dfe7ef; border-radius: 14px; background: #f8fafc; }
+.batch-series-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.batch-series-heading h3 { margin: 0; color: #162f4e; font-size: 14px; font-weight: 700; }
+.batch-series-heading p { margin: 5px 0 0; color: #718297; font-size: 12px; line-height: 1.5; }
+.batch-series-close { flex: none; border: 0; background: transparent; color: #718297; font-size: 22px; line-height: 1; cursor: pointer; }
+.batch-series-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px 20px; margin-top: 16px; }
+.batch-series-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 9px 12px; border: 1px solid #e3eaf2; border-radius: 10px; background: #fff; }
+.batch-series-name { min-width: 0; overflow-wrap: anywhere; color: #243b56; font-size: 13px; font-weight: 600; }
+.batch-series-field { display: flex; flex: none; align-items: center; gap: 8px; color: #718297; font-size: 12px; }
+.batch-series-field .wb-input { width: 68px; padding: 7px 8px; text-align: center; }
+.batch-series-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.batch-series-actions > span { margin-left: auto; color: #718297; font-size: 12px; }
+@media (max-width: 767px) { .batch-series-panel { padding: 15px; } .batch-series-actions > span { flex-basis: 100%; margin-left: 0; } }
 @media (max-width:767px) { .quota-hero { align-items:flex-start; flex-direction:column; padding:18px; } .quota-reading { justify-content:flex-start; } .style-fields { grid-template-columns:1fr; } }
 
 /* 相似款提醒：辅助信号，展开后显示相似部位与对照图 */
