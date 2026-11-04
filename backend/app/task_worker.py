@@ -30,6 +30,7 @@ class TaskWorker:
     def __init__(self):
         self._running = False
         self._loop_task: Optional[asyncio.Task] = None
+        self._loop_tasks = []
 
     async def start(self):
         self._running = True
@@ -37,17 +38,18 @@ class TaskWorker:
         if BACKGROUND_LOOP_DISABLED:
             logger.info("TaskWorker background loop disabled for isolated tests.")
             return
-        self._loop_task = asyncio.create_task(self._worker_loop())
+        try:
+            concurrency = max(1, min(8, int(os.environ.get('WORKBENCH_IMAGE_CONCURRENCY', '1'))))
+        except ValueError:
+            concurrency = 1
+        self._loop_tasks = [asyncio.create_task(self._worker_loop()) for _ in range(concurrency)]
         logger.info("TaskWorker background loop started.")
 
     async def stop(self):
         self._running = False
-        if self._loop_task:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
+        if self._loop_tasks:
+            await asyncio.gather(*self._loop_tasks, return_exceptions=True)
+            self._loop_tasks = []
         logger.info("TaskWorker background loop stopped.")
 
     def recover_interrupted_tasks(self):

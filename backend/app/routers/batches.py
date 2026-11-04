@@ -8,7 +8,7 @@ from ..config import (
     DEFAULT_WATERMARK, DEFAULT_WARNING_BUDGET, DEFAULT_HARD_LIMIT_BUDGET,
     DEFAULT_WARNING_PER_GROUP, DEFAULT_HARD_LIMIT_PER_GROUP,
 )
-from ..models import BatchCreateRequest, BatchResponse, BudgetSummary
+from ..models import BatchCreateRequest, BatchExpandRequest, BatchResponse, BudgetSummary
 from ..watermark_service import ensure_watermark_config_schema
 from ..security import UserContext, get_current_user, require_roles
 from ..budget_service import get_batch_budget_summary, reserve_budget
@@ -18,6 +18,59 @@ from ..budget_service import BudgetHardLimitExceededError, BudgetWarningExceeded
 from .designs import _maybe_wake_standby_design
 
 router = APIRouter(prefix="/api/batches", tags=["Batches"])
+
+
+@router.put('/{batch_id}/series-counts')
+def expand_batch(batch_id: str, req: BatchExpandRequest,
+                 user: UserContext = Depends(require_roles(['operator', 'leader', 'admin']))):
+    with get_db(immediate=True) as conn:
+        batch = conn.execute('SELECT * FROM batches WHERE id=?', (batch_id,)).fetchone()
+        if not batch:
+            raise HTTPException(404, '任务不存在')
+        if not batch['auto_workflow']:
+            raise HTTPException(409, '仅自动任务支持修改组数')
+        if not batch['approved_series_rules_json']:
+            raise HTTPException(409, '任务缺少规则快照')
+        old = json.loads(batch['series_counts_json'] or '{}')
+        previous = {sid: int(value['primary']) for sid, value in old.items()}
+        if req.expected_series_counts != previous:
+            raise HTTPException(409, '任务组数已变化，请刷新后重试')
+        counts = req.series_counts
+        if (not counts or any(isinstance(n, bool) or n < 1 or n > 30 for n in counts.values())
+                or sum(counts.values()) > 50 or any(counts.get(sid, 0) < n for sid, n in previous.items())):
+            raise HTTPException(400, '已有系列组数不能减少，每系列最多30组，任务最多50组')
+        delta = sum(counts.values()) - sum(previous.values())
+        if not delta:
+            raise HTTPException(400, '请增加组数或添加系列')
+        rules = get_configured_series_rules(conn)
+        if any(sid not in rules for sid in counts):
+            raise HTTPException(400, '选择的风格系列不存在')
+        snapshot = json.loads(batch['approved_series_rules_json'])
+        for sid, n in counts.items():
+            extra = n - previous.get(sid, 0)
+            if not extra:
+                continue
+            rule = rules[sid]
+            if sid not in snapshot:
+                snapshot[sid] = rule
+            index = conn.execute('SELECT COUNT(*) FROM designs WHERE batch_id=? AND series_id=?', (batch_id, sid)).fetchone()[0]
+            for offset in range(extra):
+                design_id = f'des_{uuid.uuid4().hex}'
+                code = f'AUTO-{uuid.uuid4().hex[:12].upper()}'
+                spec = generate_design_spec_from_rule(sid, index + offset, rule)
+                conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status,series_rule_snapshot_json) VALUES (?,?,?,?,'draft',?,?,'pending',?)", (design_id,batch_id,sid,code,json.dumps(spec,ensure_ascii=False),rule['template_version'],json.dumps(rule,ensure_ascii=False)))
+                for stype in ('panorama','white_isolated','twin_bed','nightstand_closeup'):
+                    conn.execute("INSERT INTO slots (id,design_id,slot_type,status) VALUES (?,?,?,'empty')", (f'slt_{uuid.uuid4().hex}',design_id,stype))
+                conn.execute('INSERT INTO planning_jobs (id,batch_id,design_id) VALUES (?,?,?)', (f'plan_{uuid.uuid4().hex}',batch_id,design_id))
+        settings = conn.execute("SELECT warning_per_group,hard_limit_per_group FROM workbench_settings WHERE id='default'").fetchone()
+        new_counts = {sid: {'primary': n, 'standby': 0} for sid, n in counts.items()}
+        conn.execute("""UPDATE batches SET enabled_series=?,series_counts_json=?,approved_series_rules_json=?,
+                     target_archived_count=?,warning_budget=warning_budget+?,hard_limit_budget=hard_limit_budget+?,
+                     status=CASE WHEN status='completed' AND is_circuit_broken=0 AND pause_reason IS NULL THEN 'active' ELSE status END,
+                     updated_at=datetime('now','localtime') WHERE id=?""",
+                     (json.dumps(list(counts),ensure_ascii=False),json.dumps(new_counts,ensure_ascii=False),json.dumps(snapshot,ensure_ascii=False),sum(counts.values()),delta*settings['warning_per_group'],delta*settings['hard_limit_per_group'],batch_id))
+        conn.execute("INSERT INTO audit_logs (id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'expand_batch',?,?,?)", (f'aud_{uuid.uuid4().hex}',batch_id,user.user_id,user.role,json.dumps({'before':previous,'after':counts},ensure_ascii=False)))
+    return {'message': '任务组数已更新', 'added': delta}
 
 
 def _series_inputs(req: BatchCreateRequest, series_ids: List[str]) -> tuple[Dict[str, Dict[str, int]], Dict[str, str]]:

@@ -265,11 +265,12 @@ def run_browser_verification():
             # 5. 管理中心仅对管理员显示
             page.locator('.role-btn[data-role="admin"]').click()
             page.wait_for_timeout(500)
+            page.locator('button[data-tab="styles"]').click()
+            page.wait_for_function("document.querySelector('#series-template-version').textContent.includes('当前模板版本:')")
+            assert page.locator("#series-rule-json").input_value()
             page.locator('button[data-tab="system"]').click()
             page.wait_for_timeout(1500)
             print("8. System protect tab opened.")
-            assert "当前模板版本:" in page.locator("#series-template-version").inner_text()
-            assert page.locator("#series-rule-json").input_value()
             assert "次" in page.locator("#metric-planning").inner_text()
             page.screenshot(path=str(EVIDENCE_DIR / "08_system_and_unknown_protect.png"))
 
@@ -411,7 +412,7 @@ def run_browser_verification():
             unlabeled_inputs = page.evaluate(r'''
                 () => [...document.querySelectorAll('input,select,textarea')].filter(el => {
                     const id = el.id;
-                    return !(el.getAttribute('aria-label')?.trim() || (id && document.querySelector(`label[for="${id}"]`)));
+                    return !(el.getAttribute('aria-label')?.trim() || el.closest('label') || (id && document.querySelector(`label[for="${id}"]`)));
                 }).length
             ''')
             assert empty_alt_images == 0, f"发现无 alt 图片: {empty_alt_images}"

@@ -263,7 +263,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('style-editor').classList.remove('hidden');
     document.getElementById('ai-style-brief').focus();
   });
-  for (const [id, key, list] of [['style-name','name',false], ['style-description','description',false], ['style-materials','materials',true], ['style-colors','color_palette',true]]) {
+  const openNewStyle = () => {
+    document.getElementById('modal-batch').classList.add('hidden');
+    document.querySelector('.tab-btn[data-tab="styles"]').click();
+    document.getElementById('style-new').click();
+  };
+  document.getElementById('new-batch-new-style').addEventListener('click', openNewStyle);
+  document.getElementById('edit-batch-new-style').addEventListener('click', openNewStyle);
+  let editingCounts = null;
+  let editingBatchId = null;
+  document.getElementById('edit-batch-series').addEventListener('click', async () => {
+    const batch = state.batches.find(b => b.id === state.currentBatchId);
+    if (!batch?.auto_workflow) { showToast('仅自动任务支持编辑组数', true); return; }
+    try {
+      const rules = await apiFetch('/api/system/series_rules');
+      if (state.currentBatchId !== batch.id) return;
+      editingBatchId = batch.id;
+      editingCounts = Object.fromEntries(Object.entries(batch.series_counts).map(([id, value]) => [id, value.primary]));
+      const list = document.getElementById('edit-batch-series-list'); list.replaceChildren();
+      for (const [id, rule] of Object.entries(rules)) {
+        const label = document.createElement('label'); label.className = 'flex items-center gap-2';
+        const name = document.createElement('span'); name.textContent = rule.name || id;
+        const input = document.createElement('input'); input.type = 'number'; input.min = String(editingCounts[id] || 0); input.max = '30'; input.value = String(editingCounts[id] || 0); input.dataset.seriesId = id; input.className = 'wb-input'; input.setAttribute('aria-label', `${rule.name || id}总组数`);
+        label.append(name, input); list.appendChild(label);
+      }
+      document.getElementById('edit-batch-series-panel').classList.remove('hidden');
+    } catch (e) { showToast(e.message, true); }
+  });
+  document.getElementById('save-batch-series').addEventListener('click', async event => {
+    const batchId = state.currentBatchId;
+    if (!editingCounts || editingBatchId !== batchId) { showToast('任务已切换，请重新打开组数编辑', true); return; }
+    const inputs = [...document.querySelectorAll('#edit-batch-series-list input')];
+    if (inputs.some(input => !Number.isInteger(Number(input.value)) || Number(input.value) < Number(input.min) || Number(input.value) > 30)) { showToast('请填写有效组数，已有组数不能减少', true); return; }
+    const counts = Object.fromEntries(inputs.filter(input => Number(input.value) > 0).map(input => [input.dataset.seriesId, Number(input.value)]));
+    event.currentTarget.disabled = true;
+    try {
+      const result = await apiFetch(`/api/batches/${batchId}/series-counts`, {method:'PUT', body:JSON.stringify({series_counts:counts,expected_series_counts:editingCounts})});
+      document.getElementById('edit-batch-series-panel').classList.add('hidden');
+      showToast(result.message); await loadBatches(batchId);
+    } catch (e) { showToast(e.message, true); }
+    finally { event.currentTarget.disabled = false; }
+  });
+  for (const [id, key, list] of [['style-name','name',false], ['style-description','description',false], ['style-materials','materials',true], ['style-colors','color_palette',true], ['style-headboards','headboard_types',true], ['style-beds','bed_frames',true], ['style-nightstands','nightstands',true], ['style-wardrobes','wardrobe_types',true], ['style-forbidden','forbidden_elements',true]]) {
     document.getElementById(id).addEventListener('input', e => {
       const raw = document.getElementById('series-rule-json');
       try { const rule = JSON.parse(raw.value); rule[key] = list ? e.target.value.split('\n').map(x => x.trim()).filter(Boolean) : e.target.value; raw.value = JSON.stringify(rule, null, 2); } catch (_) {}
@@ -754,6 +795,7 @@ async function loadBatches(selectId = null) {
 
 async function onBatchChanged() {
   const curBatch = state.batches.find(b => b.id === state.currentBatchId);
+  document.getElementById('edit-batch-series-panel').classList.add('hidden');
   panoramaSimilarityCache.clear();
   const statusEl = document.getElementById('current-batch-status');
   if (curBatch) {
@@ -998,6 +1040,7 @@ async function loadSeriesRules() {
     document.getElementById('style-name').readOnly = ['modern_business', 'natural_wood', 'soft_contemporary'].includes(select.value);
     document.getElementById('style-description').value = rule.description || '';
     document.getElementById('style-materials').value = (rule.materials || []).join('\n');
+    for (const [id, key] of [['style-headboards','headboard_types'],['style-beds','bed_frames'],['style-nightstands','nightstands'],['style-wardrobes','wardrobe_types'],['style-forbidden','forbidden_elements']]) document.getElementById(id).value = (rule[key] || []).join('\n');
     document.getElementById('style-colors').value = (rule.color_palette || []).join('\n');
   } catch (e) {
     showToast('加载系列规则失败: ' + e.message, true);

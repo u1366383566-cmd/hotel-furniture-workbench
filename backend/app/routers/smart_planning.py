@@ -138,7 +138,8 @@ def generate(design_id: str, req: ReplanRequest, user: UserContext = Depends(req
         if not cfg['enabled'] or not cfg['has_key']:
             raise HTTPException(400, '请先配置独立文本模型和密钥')
         previous = row['structured_spec']
-        rule = json.loads(row['approved_series_rules_json'])[row['series_id']]
+        rule = (json.loads(row['series_rule_snapshot_json']) if row['series_rule_snapshot_json']
+                else json.loads(row['approved_series_rules_json'])[row['series_id']])
         history = _rows(conn, row['batch_id'], row['id'])[:30]
         references = []
         for h in history:

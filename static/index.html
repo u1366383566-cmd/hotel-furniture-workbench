@@ -65,6 +65,8 @@
             <span id="current-batch-status" class="wb-badge wb-badge-slate">加载中</span>
           </div>
           <p id="current-batch-series" class="text-xs text-inkMuted mt-1 truncate">启用系列: 现代商务 / 自然木质 / 柔和当代</p>
+          <button id="edit-batch-series" class="wb-btn wb-btn-ghost" type="button">编辑任务系列和组数</button>
+          <div id="edit-batch-series-panel" class="hidden"><div id="edit-batch-series-list"></div><button id="save-batch-series" class="wb-btn wb-btn-dark" type="button">保存组数</button><button id="edit-batch-new-style" class="wb-btn wb-btn-ghost" type="button">新建风格</button></div>
         </div>
 
         <!-- 归档目标进度 -->
@@ -172,6 +174,11 @@
             <label>风格方向<textarea id="style-description" class="wb-input" rows="2"></textarea></label>
             <label>材质（每行一项）<textarea id="style-materials" class="wb-input" rows="3"></textarea></label>
             <label>配色（每行一项）<textarea id="style-colors" class="wb-input" rows="3"></textarea></label>
+            <label>床屏造型（每行一项）<textarea id="style-headboards" class="wb-input" rows="3"></textarea></label>
+            <label>床体造型（每行一项）<textarea id="style-beds" class="wb-input" rows="3"></textarea></label>
+            <label>床头柜造型（每行一项）<textarea id="style-nightstands" class="wb-input" rows="3"></textarea></label>
+            <label>柜体造型（每行一项）<textarea id="style-wardrobes" class="wb-input" rows="3"></textarea></label>
+            <label>禁用元素（每行一项）<textarea id="style-forbidden" class="wb-input" rows="3"></textarea></label>
           </div>
           <details class="workbench-details"><summary>高级规则（JSON）</summary><textarea id="series-rule-json" aria-label="系列规则 JSON" rows="9" class="wb-input font-mono leading-relaxed"></textarea></details>
           <div class="flex items-center justify-between mt-2 gap-3 flex-wrap">
@@ -497,6 +504,7 @@
         </div>
         <div>
           <label class="block text-inkBody font-semibold mb-1.5">启用产品系列</label>
+          <button id="new-batch-new-style" class="wb-btn wb-btn-ghost" type="button">新建风格</button>
           <div id="series-check-container" class="mt-1 space-y-1.5">
             <div class="text-inkMuted">系列列表加载中...</div>
           </div>

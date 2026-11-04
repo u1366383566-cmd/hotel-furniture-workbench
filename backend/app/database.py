@@ -63,6 +63,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('budget_ledger', 'ledger_event_type', 'TEXT')
     add_col_if_missing('designs', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('designs', 'planning_status', "TEXT NOT NULL DEFAULT 'legacy'")
+    add_col_if_missing('designs', 'series_rule_snapshot_json', 'TEXT')
     add_col_if_missing('designs', 'verified_features', 'TEXT')
     add_col_if_missing('designs', 'verified_features_version_id', 'TEXT')
     add_col_if_missing('slot_versions', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")

@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 class BatchCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="批次名称")
@@ -44,6 +44,10 @@ class BatchResponse(BaseModel):
     series_preferences: Dict[str, str] = Field(default_factory=dict)
     created_at: str
     updated_at: str
+
+class BatchExpandRequest(BaseModel):
+    series_counts: Dict[str, StrictInt]
+    expected_series_counts: Dict[str, StrictInt]
 
 class BudgetSummary(BaseModel):
     batch_id: str
