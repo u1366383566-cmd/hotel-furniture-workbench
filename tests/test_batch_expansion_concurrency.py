@@ -1,12 +1,14 @@
 import json
 import threading
+import io
 from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
 
 from backend.app.database import get_db
 from backend.app.task_worker import worker_instance
 
 
-def test_expand_batch_preserves_rules_and_creates_28_planning_jobs(client):
+def test_expand_batch_preserves_rules_and_creates_28_planning_jobs(client, monkeypatch):
     headers = {'X-User-Role': 'admin'}
     batch = client.post('/api/batches', headers=headers, json={
         'name': '扩充测试', 'enabled_series': ['modern_business'],
@@ -35,7 +37,21 @@ def test_expand_batch_preserves_rules_and_creates_28_planning_jobs(client):
         assert conn.execute('SELECT COUNT(*) FROM planning_jobs WHERE batch_id=?', (bid,)).fetchone()[0] == 30
         assert {row['id']: row['structured_spec'] for row in designs if not row['series_rule_snapshot_json']} == {row['id']: row['structured_spec'] for row in original}
         assert all(json.loads(row['series_rule_snapshot_json'])['headboard_types'] == ['扩充时的新床屏'] for row in designs if row['series_rule_snapshot_json'])
+        added_id = next(row['id'] for row in designs if row['series_rule_snapshot_json'])
+    assert client.put('/api/system/text_api', headers=headers, json={'base_url':'http://test', 'model':'test', 'api_key':'test', 'timeout_seconds':10}).status_code == 200
+    contexts = []
+    def fake_chat(cfg, system, user, model, timeout):
+        contexts.append(json.loads(user))
+        return json.dumps({'headboard':'床屏','bed_frame':'床体','nightstand':'床头柜','wardrobe':'衣柜', 'main_materials':['木'], 'color_scheme':['灰'], 'companion_items':['椅'], 'soft_furnishings':'床品','design_difference':'造型','panorama_prompt':'全景'}, ensure_ascii=False)
+    monkeypatch.setattr('backend.app.routers.smart_planning.chat_completion_real', fake_chat)
+    assert client.post(f'/api/planning/design/{added_id}/generate', headers=headers, json={}).status_code == 200
+    assert contexts[0]['series_rule']['headboard_types'] == ['扩充时的新床屏']
     with get_db(immediate=True) as conn:
+        from backend.app.auto_planning_service import queue_replacement
+        source = conn.execute('SELECT id,series_rule_snapshot_json FROM designs WHERE batch_id=? AND series_rule_snapshot_json IS NOT NULL LIMIT 1', (bid,)).fetchone()
+        replacement = queue_replacement(conn, bid, 'modern_business', source['id'])
+        rule = conn.execute('SELECT series_rule_snapshot_json FROM designs WHERE id=?', (replacement,)).fetchone()
+        assert json.loads(rule['series_rule_snapshot_json']) == json.loads(source['series_rule_snapshot_json'])
         conn.execute("UPDATE series_rule_configs SET rule_json=?,template_version=?,updated_by=? WHERE series_id='modern_business'", tuple(original_rule))
 
 
@@ -86,3 +102,38 @@ def test_expansion_keeps_pause_and_allows_new_series(client):
         assert row['status'] == 'paused' and row['pause_reason'] == 'PAUSE_UNKNOWN_PENDING'
         assert 'natural_wood' in json.loads(row['approved_series_rules_json'])
         assert conn.execute("SELECT COUNT(*) FROM designs WHERE batch_id=? AND series_id='natural_wood' AND series_rule_snapshot_json IS NOT NULL", (batch['id'],)).fetchone()[0] == 2
+
+
+def test_concurrent_unknown_pauses_batch_without_losing_other_result(client, monkeypatch):
+    from backend.app.routers.batches import _queue_initial_panorama
+    batch = client.post('/api/batches', headers={'X-User-Role':'admin'}, json={
+        'name':'并发异常', 'enabled_series':['modern_business'], 'target_archived_count':2,
+        'designs_per_series':2, 'standby_designs_per_series':0, 'auto_start_panorama':False,
+    }).json()
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE batches SET status='active' WHERE id=?", (batch['id'],))
+        conn.execute("UPDATE image_api_configs SET enabled=1,base_url='http://mock',model='test',api_key='test' WHERE id='default'")
+        for row in conn.execute('SELECT id,design_code FROM designs WHERE batch_id=?', (batch['id'],)).fetchall():
+            _queue_initial_panorama(conn, batch['id'], row['id'], row['design_code'])
+    barrier = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    calls = []
+    picture = io.BytesIO()
+    Image.new('RGB', (32, 32), 'white').save(picture, format='PNG')
+    def generate(cfg, prompt):
+        with lock:
+            index = len(calls)
+            calls.append(index)
+        barrier.wait()
+        if index == 0:
+            raise TimeoutError('simulated timeout')
+        return picture.getvalue(), 'mock-id'
+    monkeypatch.setattr('backend.app.task_worker.generate_image_real', generate)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert all(pool.map(lambda _: worker_instance.process_next_task(), range(2)))
+    with get_db() as conn:
+        state = conn.execute('SELECT status,pause_reason FROM batches WHERE id=?', (batch['id'],)).fetchone()
+        statuses = [r['status'] for r in conn.execute('SELECT status FROM tasks WHERE batch_id=?', (batch['id'],))]
+        assert state['status'] == 'paused' and state['pause_reason'] == 'PAUSE_UNKNOWN_PENDING'
+        assert sorted(statuses) == ['completed','unknown']
+        assert conn.execute("SELECT COUNT(*) FROM budget_ledger WHERE batch_id=? AND status='unknown_held'", (batch['id'],)).fetchone()[0] == 1

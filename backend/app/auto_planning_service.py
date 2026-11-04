@@ -8,18 +8,21 @@ from .database import get_db
 from .security import UserContext
 
 
-def queue_replacement(conn, batch_id, series_id):
+def queue_replacement(conn, batch_id, series_id, source_design_id=None):
     from .planning_service import generate_design_spec_from_rule
     row = conn.execute('SELECT approved_series_rules_json FROM batches WHERE id=?', (batch_id,)).fetchone()
     rules = json.loads(row['approved_series_rules_json'] or '{}')
+    source = conn.execute('SELECT series_rule_snapshot_json FROM designs WHERE id=? AND batch_id=? AND series_id=?', (source_design_id, batch_id, series_id)).fetchone() if source_design_id else None
+    if source and source['series_rule_snapshot_json']:
+        rules[series_id] = json.loads(source['series_rule_snapshot_json'])
     if series_id not in rules:
         return None
     index = conn.execute('SELECT COUNT(*) AS n FROM designs WHERE batch_id=? AND series_id=?', (batch_id, series_id)).fetchone()['n']
     spec = generate_design_spec_from_rule(series_id, index, rules[series_id])
     design_id = f'des_{uuid.uuid4().hex[:12]}'
     code = f'AUTO-{uuid.uuid4().hex[:8].upper()}'
-    conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status) VALUES (?,?,?,?,'draft',?,?,'pending')",
-                 (design_id,batch_id,series_id,code,json.dumps(spec,ensure_ascii=False),spec['template_version']))
+    conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status,series_rule_snapshot_json) VALUES (?,?,?,?,'draft',?,?,'pending',?)",
+                 (design_id,batch_id,series_id,code,json.dumps(spec,ensure_ascii=False),spec['template_version'],json.dumps(rules[series_id],ensure_ascii=False)))
     for slot_type in ('panorama','white_isolated','twin_bed','nightstand_closeup'):
         conn.execute("INSERT INTO slots (id,design_id,slot_type,status) VALUES (?,?,?,'empty')", (f'slt_{uuid.uuid4().hex}',design_id,slot_type))
     conn.execute('INSERT INTO planning_jobs (id,batch_id,design_id) VALUES (?,?,?)', (f'plan_{uuid.uuid4().hex}',batch_id,design_id))

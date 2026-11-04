@@ -108,7 +108,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         updated_at=d_row["updated_at"]
     )
 
-def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_id: Optional[str] = None):
+def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_id: Optional[str] = None, source_design_id: Optional[str] = None):
     cur = conn.cursor()
     cur.execute("SELECT target_archived_count, current_archived_count, is_circuit_broken, smart_planning, planning_confirmed, auto_workflow, status FROM batches WHERE id = ?", (batch_id,))
     b_row = cur.fetchone()
@@ -157,7 +157,7 @@ def _maybe_wake_standby_design(conn: sqlite3.Connection, batch_id: str, series_i
     if not stby:
         if b_row['auto_workflow'] and series_id:
             from ..auto_planning_service import queue_replacement
-            queue_replacement(conn,batch_id,series_id)
+            queue_replacement(conn,batch_id,series_id,source_design_id)
         return
 
     stby_id = stby["id"]
@@ -424,7 +424,7 @@ def review_panorama(
                 VALUES (?, ?, ?, ?, 'panorama_first_pass', 'eliminate', ?, ?, ?, ?)
             """, (f"rev_{uuid.uuid4().hex[:8]}", design_id, slot_id, curr_vid, req.reason_category, req.detail_comment, user.user_id, user.role))
 
-            _maybe_wake_standby_design(conn, batch_id, series_id)
+            _maybe_wake_standby_design(conn, batch_id, series_id, design_id)
 
         else:
             raise HTTPException(status_code=400, detail="未知的审核动作")
@@ -630,7 +630,7 @@ def review_quad(
                 INSERT INTO reviews (id, design_id, review_stage, action, detail_comment, reviewer_name, reviewer_role)
                 VALUES (?, ?, 'quad_final_pass', 'eliminate', ?, ?, ?)
             """, (f"rev_{uuid.uuid4().hex[:8]}", design_id, req.detail_comment, user.user_id, user.role))
-            _maybe_wake_standby_design(conn, batch_id, series_id)
+            _maybe_wake_standby_design(conn, batch_id, series_id, design_id)
             return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
 
         b_row = cur.execute("SELECT is_circuit_broken, status FROM batches WHERE id = ?", (batch_id,)).fetchone()
