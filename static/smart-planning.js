@@ -27,7 +27,7 @@ function candidateList(candidates) {
     const card = element('div', undefined, 'p-3 rounded-xl border border-lineLight bg-slate-50');
     card.appendChild(element('strong', `${item.design_code} · ${item.feature_source} · 相似部位：${item.matched_fields.join('、')}`, 'text-xs'));
     if (item.preview_version_id) {
-      const img = element('img'); img.src = `/api/media/preview/${encodeURIComponent(item.preview_version_id)}`; img.alt = `${item.design_code} 历史全景预览`; img.style.maxWidth = '180px'; img.className = 'rounded-xl mt-2'; card.appendChild(img);
+      const img = element('img'); img.src = withBase(`/api/media/preview/${encodeURIComponent(item.preview_version_id)}`); img.alt = `${item.design_code} 历史全景预览`; img.style.maxWidth = '180px'; img.className = 'rounded-xl mt-2'; card.appendChild(img);
     }
     for (const [key, label] of planFields.slice(0, 4)) card.appendChild(element('p', `${label}：${item.features[key] || '未记录'}`, 'text-xs text-inkMuted'));
     wrap.appendChild(card);
@@ -171,7 +171,7 @@ async function showComparison(designId) {
     dialog.appendChild(element('h3', '历史款对照与成图特征核实', 'text-sm font-bold'));
     dialog.appendChild(element('p', '请对照当前全景图，按需修正家具特征；未修正项保留原方案。', 'text-xs text-inkMuted'));
     if (current.version_id) {
-      const img = element('img'); img.src = `/api/media/preview/${encodeURIComponent(current.version_id)}`;
+      const img = element('img'); img.src = withBase(`/api/media/preview/${encodeURIComponent(current.version_id)}`);
       img.alt = '当前款全景预览'; img.style.maxWidth = '240px'; img.className = 'rounded-xl mt-2'; dialog.appendChild(img);
     }
     const inputs = {};

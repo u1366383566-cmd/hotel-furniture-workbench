@@ -3,6 +3,9 @@
  * 视觉规范: premium-minimal-web-ui (Manus 风格) — 白卡片/细描边/克制蓝紫渐变/字重分层
  */
 
+const APP_BASE = document.querySelector('meta[name="app-base"]')?.content || '';
+function withBase(url) { return url.startsWith('/') && !url.startsWith('//') ? APP_BASE + url : url; }
+
 const state = {
   currentRole: 'operator',
   currentUserId: 'simulated_operator',
@@ -32,7 +35,7 @@ async function apiFetch(url, options = {}) {
     ...authHeaders(),
     ...(options.headers || {})
   };
-  const res = await fetch(url, {
+  const res = await fetch(withBase(url), {
     ...options,
     headers,
     // 审核、预算和 unknown 保护中心必须读取最新账本状态，禁止复用旧 GET 响应缓存。
@@ -50,7 +53,7 @@ async function apiFetch(url, options = {}) {
 }
 
 async function downloadAuthenticatedZip(url, fallbackName) {
-  const res = await fetch(url, { headers: authHeaders(false) });
+  const res = await fetch(withBase(url), { headers: authHeaders(false) });
   if (!res.ok) {
     let message = `ZIP 下载失败 (${res.status})`;
     try {
@@ -239,6 +242,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('admin-budget-panel').appendChild(document.getElementById('admin-budget-metrics'));
   initCustomSelects(document);
   setupRoleSelector();
+  if (APP_BASE) {
+    const identity = await apiFetch('/api/session');
+    const role = identity.role === 'admin' || identity.role === 'leader' ? 'admin' : 'operator';
+    state.currentRole = role;
+    state.currentUserId = identity.user_id;
+    document.querySelector('[data-tab="system"]').classList.toggle('hidden', role !== 'admin');
+    document.querySelectorAll('.role-btn').forEach(button => {
+      button.classList.toggle('seg-active', button.dataset.role === role);
+      button.disabled = true;
+    });
+    document.getElementById('btn-new-batch').classList.toggle('hidden', role !== 'admin');
+  }
   setupTabs();
   setupModals();
   setupAccessibleModals();
@@ -1248,7 +1263,7 @@ function renderPanoramaTab() {
     if (curVer && curVer.preview_image_path) {
       imgHtml = `
         <div class="relative w-full aspect-square bg-slate-100 overflow-hidden">
-          <img src="/api/media/preview/${curVer.id}" alt="${d.design_code}" class="w-full h-full object-contain">
+          <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${d.design_code}" class="w-full h-full object-contain">
           <div class="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-slate-900/70 text-white text-[11px] font-mono backdrop-blur-xs">
             ${d.design_code} · v${curVer.version_num}
           </div>
@@ -1601,7 +1616,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
   if (curVer && curVer.preview_image_path) {
     imgArea = `
       <div class="relative w-full aspect-square bg-slate-100 rounded-xl overflow-hidden border border-lineLight">
-        <img src="/api/media/preview/${curVer.id}" alt="${design.design_code} ${label}" class="w-full h-full object-contain">
+        <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${design.design_code} ${label}" class="w-full h-full object-contain">
         ${
           isInvalidated
           ? `<div class="absolute inset-0 bg-rose-900/60 backdrop-blur-xs flex items-center justify-center text-white text-xs font-bold p-2 text-center">
@@ -1747,7 +1762,7 @@ function renderArchivedTab() {
           const sl = slots[stype];
           const vid = sl && sl.current_version ? sl.current_version.id : null;
           return vid
-            ? `<img src="/api/media/preview/${vid}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight" title="${stype}">`
+            ? `<img src="${withBase(`/api/media/preview/${vid}`)}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight" title="${stype}">`
             : `<div class="w-full aspect-square bg-slate-100 rounded-lg"></div>`;
         }).join('')}
       </div>

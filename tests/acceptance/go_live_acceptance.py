@@ -188,7 +188,7 @@ def run_acceptance(base, storage, server):
     check("健康检查可用", st == 200)
     check("Mock 模式明确声明", health.get("mock_mode") is True and health.get("offline_safe") is True, health)
     st, index = http("GET", base, raw=True)
-    check("前端首页可加载", st == 200 and "酒店家具智能套图工作台".encode() in index)
+    check("前端首页可加载", st == 200 and "SEEZO 视觉工作台".encode() in index)
 
     # ---------- 2. RBAC ----------
     print("\n--- 2. RBAC 权限与安全 ---")
@@ -461,7 +461,9 @@ def run_acceptance(base, storage, server):
     check("结果未知后批次暂停(PAUSE_UNKNOWN_PENDING)", fb2["pause_reason"] == "PAUSE_UNKNOWN_PENDING", fb2)
     _, fb3 = http("GET", f"{base}/api/batches/{fault_id}/budget", headers=H("operator"))
     check("unknown 保守计入预算(unknown_held)", fb3["unknown_count"] >= 1, fb3)
-    st, ut = http("GET", f"{base}/api/system/batches/{fault_id}/unknown_tasks", headers=H("operator"))
+    st, _ = http("GET", f"{base}/api/system/batches/{fault_id}/unknown_tasks", headers=H("operator"))
+    check("操作员不能查看管理员保护中心", st == 403, st)
+    st, ut = http("GET", f"{base}/api/system/batches/{fault_id}/unknown_tasks", headers=H("leader"))
     check("unknown 任务出现在保护中心(无重复行)", st == 200 and len(ut) == 1, ut)
     st, _ = http("POST", f"{base}/api/system/resolve_unknown", headers=H("operator"),
                  body=json.dumps({"task_id": task[0]["id"], "resolution": "confirm_failure", "evidence": "x",
@@ -531,7 +533,7 @@ def run_acceptance(base, storage, server):
     # ---------- 11. 清理保护 ----------
     print("\n--- 11. 30 天清理保护 ---")
     st, _ = http("POST", f"{base}/api/system/cleanup", headers=H("leader"), body=json.dumps({"days_threshold": 30}))
-    check("负责人不能执行清理(Admin 专属)", st == 403, st)
+    check("旧负责人身份具有管理员清理权限", st == 200, st)
     st, cl = http("POST", f"{base}/api/system/cleanup", headers=role_headers("admin"), body=json.dumps({"days_threshold": 30}))
     check("管理员执行受保护清理成功", st == 200 and "protected_version_count" in cl.get("stats", {}), cl)
     check("清理不删除归档版本(数量守恒)",

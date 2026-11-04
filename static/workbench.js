@@ -101,7 +101,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     } catch(e){showToast(e.message,true);}
   });
   document.addEventListener('click',e=>{
-    const img=e.target.closest('img[src^="/api/media/preview/"]'); if(!img) return;
+    const img=e.target.closest('img[src*="/api/media/preview/"]'); if(!img) return;
     const dialog=document.createElement('dialog'); dialog.className='image-preview-dialog';
     const close=document.createElement('button'); close.className='wb-btn wb-btn-ghost'; close.textContent='关闭'; close.onclick=()=>dialog.close();
     const full=document.createElement('img'); full.src=img.src; full.alt=img.alt || '图片预览';

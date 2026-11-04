@@ -323,7 +323,7 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .image-preview-dialog { max-width: min(92vw,1100px); max-height: 90vh; padding: 12px; border: 0; border-radius: 14px; background: #fff; }
 .image-preview-dialog::backdrop { background: rgba(15,23,42,.65); }
 .image-preview-dialog img { display: block; max-width: 100%; max-height: 78vh; margin: 10px auto 0; object-fit: contain; }
-img[src^='/api/media/preview/'] { cursor: zoom-in; }
+img[src*='/api/media/preview/'] { cursor: zoom-in; }
 .wb-btn:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
 @media (max-width: 767px) {
   .workbench-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
