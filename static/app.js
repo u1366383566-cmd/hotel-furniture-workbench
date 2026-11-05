@@ -252,7 +252,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       button.classList.toggle('seg-active', button.dataset.role === role);
       button.disabled = true;
     });
-    document.getElementById('btn-new-batch').classList.toggle('hidden', role !== 'admin');
   }
   setupTabs();
   setupModals();

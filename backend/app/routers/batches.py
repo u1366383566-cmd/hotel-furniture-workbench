@@ -10,7 +10,7 @@ from ..config import (
 )
 from ..models import BatchCreateRequest, BatchExpandRequest, BatchResponse, BudgetSummary
 from ..watermark_service import ensure_watermark_config_schema
-from ..security import UserContext, get_current_user, require_roles, AUTH_MODE
+from ..security import UserContext, get_current_user, require_roles
 from ..budget_service import get_batch_budget_summary, reserve_budget
 from ..series_rules_service import get_configured_series_rules
 from ..planning_service import build_mock_visual_features, build_slot_prompt, generate_design_spec_from_rule, get_batch_rule_snapshot
@@ -168,8 +168,6 @@ def create_batch(
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     batch_id = f"batch_{uuid.uuid4().hex[:8]}"
-    if AUTH_MODE == "trusted_proxy" and user.is_operator:
-        raise HTTPException(status_code=403, detail="只有管理员可以创建批次")
     if user.is_operator and not req.auto_workflow:
         raise HTTPException(status_code=403, detail='美工只能创建自动规划任务')
 
