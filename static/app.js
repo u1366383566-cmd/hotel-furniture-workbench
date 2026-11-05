@@ -97,7 +97,7 @@ async function handleBudgetGuardError(e, retryFn) {
   const b = state.budget || {};
   const info = `当前已占用 ${b.image_generation_count ?? '?'} 次 | 预警线 ${b.warning_budget ?? '?'} | 硬上限 ${b.hard_limit_budget ?? '?'}（硬上限批准也无法突破）`;
   if (!['leader', 'admin'].includes(state.currentRole)) {
-    showToast('已暂停：需管理员或负责人批准越过预警线。请右上角切换身份后重试。', true);
+    showToast('已暂停：需管理员或负责人批准越过预警线。请联系管理员审批后重试。', true);
     return;
   }
   if (confirm(`${msg}\n\n${info}\n\n是否以管理员身份批准越过预警线，并立即继续本次操作？`)) {
@@ -249,9 +249,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.currentUserId = identity.user_id;
     document.querySelector('[data-tab="system"]').classList.toggle('hidden', role !== 'admin');
     document.querySelectorAll('.role-btn').forEach(button => {
-      button.classList.toggle('seg-active', button.dataset.role === role);
-      button.disabled = true;
+      button.remove();
     });
+    const badge = document.createElement('span');
+    badge.className = 'role-badge';
+    badge.textContent = role === 'admin' ? '管理员' : '操作员 · 美工';
+    badge.title = `当前登录身份：${badge.textContent}（${identity.user_id}）`;
+    document.querySelector('.role-switch').appendChild(badge);
   }
   setupTabs();
   setupModals();
