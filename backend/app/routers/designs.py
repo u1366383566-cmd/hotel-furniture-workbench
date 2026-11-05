@@ -485,6 +485,7 @@ def start_downstream(
             raise HTTPException(status_code=409, detail='全景版本已变化，请重新审核')
 
         downstream_slots = ["white_isolated", "twin_bed", "nightstand_closeup"]
+        white_version_id = None
         for stype in downstream_slots:
             cur.execute("SELECT id FROM slots WHERE design_id = ? AND slot_type = ?", (design_id, stype))
             s_row = cur.fetchone()
@@ -497,8 +498,11 @@ def start_downstream(
             next_num = (cur.fetchone()["mv"] or 0) + 1
 
             v_id = f"ver_{uuid.uuid4().hex[:8]}"
+            if stype == 'white_isolated':
+                white_version_id = v_id
             downstream_spec = json.loads(d_row["structured_spec"])
             downstream_prompt, downstream_metadata = build_slot_prompt(stype, downstream_spec, code, d_row["template_version"], pano_vid)
+            downstream_metadata['reference_version_id'] = pano_vid if stype == 'white_isolated' else white_version_id
             conn.execute("""
                 INSERT INTO slot_versions (
                         id, slot_id, design_id, version_num, attempt_num, prompt, prompt_metadata,

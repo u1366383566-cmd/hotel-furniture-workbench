@@ -323,6 +323,14 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .workbench-details p { margin: 8px 0; white-space: pre-wrap; }
 .image-preview-dialog { max-width: min(92vw,1100px); max-height: 90vh; padding: 12px; border: 0; border-radius: 14px; background: #fff; }
 .image-preview-dialog::backdrop { background: rgba(15,23,42,.65); }
+.prompt-dialog { width: min(680px, 94vw); max-height: 90vh; overflow: auto; border: 0; border-radius: 16px; padding: 24px; color: #243b56; }
+.prompt-dialog::backdrop { background: rgba(15,23,42,.65); }
+.prompt-dialog h3 { font-weight: 700; margin-bottom: 12px; }
+.prompt-dialog p { margin: 10px 0; color: #64748b; font-size: 12px; }
+.prompt-dialog-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow: auto; padding: 14px; border-radius: 10px; background: #f1f5f9; font: inherit; font-size: 13px; line-height: 1.7; }
+.prompt-dialog-actions { display: flex; gap: 8px; margin-top: 14px; }
+.prompt-dialog-actions button[hidden] { display: none; }
+.prompt-view { margin-top: 6px; }
 .image-preview-dialog img { display: block; max-width: 100%; max-height: 78vh; margin: 10px auto 0; object-fit: contain; }
 img[src*='/api/media/preview/'] { cursor: zoom-in; }
 .wb-btn:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }

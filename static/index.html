@@ -464,6 +464,7 @@
           <label class="block text-inkBody font-semibold mb-1.5" for="redo-comment">详细说明</label>
           <textarea id="redo-comment" aria-label="重做详细说明" rows="3" class="wb-input" placeholder="填写具体的改动指导建议..."></textarea>
         </div>
+        <div id="redo-prompt-box" class="hidden"><label for="redo-custom-prompt">本次重做提示词</label><textarea id="redo-custom-prompt" class="wb-input" rows="10" maxlength="12000"></textarea><p>仅用于这次重做，原版本不会改变。</p></div>
         <div id="redo-override-box" class="hidden p-2.5 bg-amber-50 border border-amber-100 rounded-xl">
           <label class="flex items-center gap-2 text-amber-800 font-medium cursor-pointer">
             <input type="checkbox" id="redo-leader-override" aria-label="负责人特批继续重做" class="accent-blue-600">

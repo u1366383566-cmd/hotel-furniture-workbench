@@ -138,6 +138,7 @@ class SlotRedoRequest(BaseModel):
     reason_category: str
     detail_comment: Optional[str] = None
     leader_override: bool = False
+    custom_prompt: Optional[str] = Field(default=None, max_length=12000)
 
 class SlotVersionSelectRequest(BaseModel):
     slot_id: str

@@ -503,6 +503,7 @@ function setupModals() {
     const comment = document.getElementById('redo-comment').value.trim();
     const override = document.getElementById('redo-leader-override').checked;
     const modalRedo = document.getElementById('modal-redo');
+    if (ctx.editPrompt && !document.getElementById('redo-custom-prompt').value.trim()) { showToast('请填写本次重做提示词', true); return; }
 
     const run = async () => {
       if (ctx.type === 'panorama') {
@@ -524,7 +525,8 @@ function setupModals() {
             expected_version_id: ctx.versionId,
             reason_category: category,
             detail_comment: comment,
-            leader_override: override
+            leader_override: override,
+            custom_prompt: ctx.editPrompt ? document.getElementById('redo-custom-prompt').value : null
           })
         });
       }
@@ -1422,9 +1424,44 @@ function openRedoModal(ctx) {
     document.getElementById('redo-reason-category')._syncDD();
   }
   document.getElementById('redo-comment').value = '';
+  document.getElementById('redo-prompt-box').classList.toggle('hidden', !ctx.editPrompt);
+  document.getElementById('redo-custom-prompt').value = ctx.promptText || '';
   document.getElementById('redo-leader-override').checked = false;
   document.getElementById('modal-redo').classList.remove('hidden');
 }
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('.prompt-view');
+  if (!button) return;
+  const design = state.designs.find(d => d.id === button.dataset.designId);
+  const slot = design?.slots?.[button.dataset.slotType];
+  if (!slot?.current_version) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'prompt-dialog';
+  const title = document.createElement('h3'); title.textContent = '图片提示词与参考版本';
+  const select = document.createElement('select'); select.className = 'wb-input'; select.setAttribute('aria-label', '查看提示词的图片版本');
+  const versions = slot.history_versions || [slot.current_version];
+  for (const version of versions) { const option = document.createElement('option'); option.value = version.id; option.textContent = `版本 ${version.version_num}`; option.selected = version.id === slot.current_version.id; select.appendChild(option); }
+  const reference = document.createElement('p');
+  const promptText = document.createElement('pre'); promptText.className = 'prompt-dialog-text';
+  const status = document.createElement('p');
+  const actions = document.createElement('div'); actions.className = 'prompt-dialog-actions';
+  const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'wb-btn wb-btn-dark'; edit.textContent = '编辑并重做';
+  const close = document.createElement('button'); close.type = 'button'; close.className = 'wb-btn wb-btn-ghost'; close.textContent = '关闭'; close.onclick = () => dialog.close();
+  const refresh = () => {
+    const version = versions.find(v => v.id === select.value); const meta = version?.prompt_metadata || {};
+    const ref = meta.reference_version_id || meta.reference_panorama_version_id;
+    const refSlot = button.dataset.slotType === 'white_isolated' ? design.slots.panorama : design.slots.white_isolated;
+    const matched = refSlot?.history_versions?.find(v => v.id === ref);
+    reference.textContent = ref ? `参考图片：${button.dataset.slotType === 'white_isolated' ? '全景' : '白底组合图'} ${matched ? 'v' + matched.version_num : ref}` : '历史参考版本未记录';
+    promptText.textContent = meta.real_prompt || meta.prepared_prompt || '该版本未记录实际提示词';
+    status.textContent = meta.prompt_status === 'prepared' ? '以下为准备发送的提示词，生成未成功；无法确认上游是否收到。' : '';
+    edit.hidden = select.value !== slot.current_version_id || !meta.real_prompt || ['archived','eliminated'].includes(design.status) || slot.status === 'generating';
+    edit.onclick = () => { dialog.close(); openRedoModal({type:'slot', designId:design.id, slotId:slot.id, versionId:slot.current_version_id, redoCount:slot.redo_count, totalRedo:design.total_redo_count, editPrompt:true, promptText:meta.real_prompt}); };
+  };
+  select.onchange = refresh; actions.append(edit,close); dialog.append(title,select,reference,promptText,status,actions);
+  dialog.addEventListener('close', () => dialog.remove()); document.body.appendChild(dialog); refresh(); dialog.showModal();
+});
 
 // ---------- 渲染 2. 四图终审区 ----------
 
@@ -1682,6 +1719,8 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
           ${imgArea}
         </div>
         ${historyOptions}
+        ${!isPanorama && curVer ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${design.id}" data-slot-type="${slot.slot_type}">查看提示词</button>` : ''}
+        ${!isPanorama && ['twin_bed','nightstand_closeup'].includes(slot.slot_type) && (curVer?.prompt_metadata?.reference_version_id || curVer?.prompt_metadata?.reference_panorama_version_id) && design.slots.white_isolated?.current_version_id !== (curVer.prompt_metadata.reference_version_id || curVer.prompt_metadata.reference_panorama_version_id) ? '<p class="text-xs text-amber-700">参考的白底组合图版本与当前版本不同</p>' : ''}
       </div>
 
       <div class="pt-1 flex items-center justify-end">
@@ -1741,7 +1780,7 @@ function renderArchivedTab() {
   const container = document.getElementById('archived-designs-grid');
   container.innerHTML = '';
   loadExportRecords();
-  const archived = state.designs.filter(d => d.status === 'archived');
+  const archived = state.designs.filter(d => ['archived', 'eliminated'].includes(d.status));
 
   if (archived.length === 0) {
     container.innerHTML = `<div class="col-span-full wb-card">${emptyState('当前批次暂无已归档的设计成果', '完成四图终审归档后，可在此导出带水印 ZIP')}</div>`;
@@ -1755,8 +1794,8 @@ function renderArchivedTab() {
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
-        <label class="text-xs font-bold text-inkTitle font-mono"><input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出"> ${escapeText(d.design_code)}</label>
-        <span class="wb-badge wb-badge-emerald">✓ 已完成</span>
+        <label class="text-xs font-bold text-inkTitle font-mono">${d.status === 'archived' ? `<input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出">` : ''} ${escapeText(d.design_code)}</label>
+        <span class="wb-badge wb-badge-emerald">${d.status === 'archived' ? '✓ 已完成' : '已淘汰'}</span>
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(d.structured_spec.model_title)}</div>
 
@@ -1765,7 +1804,7 @@ function renderArchivedTab() {
           const sl = slots[stype];
           const vid = sl && sl.current_version ? sl.current_version.id : null;
           return vid
-            ? `<img src="${withBase(`/api/media/preview/${vid}`)}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight" title="${stype}">`
+            ? `<div><img src="${withBase(`/api/media/preview/${vid}`)}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight" title="${stype}">${stype !== 'panorama' ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${d.id}" data-slot-type="${stype}">查看提示词</button>` : ''}</div>`
             : `<div class="w-full aspect-square bg-slate-100 rounded-lg"></div>`;
         }).join('')}
       </div>
@@ -1773,7 +1812,7 @@ function renderArchivedTab() {
       <details class="workbench-details"><summary>查看完整套图与设计说明</summary><p>系列：${escapeText(d.series_name || '')}</p><p>材质：${escapeText((d.structured_spec.main_materials || []).join('、'))}</p><p>配色：${escapeText((d.structured_spec.color_scheme || []).join('、'))}</p></details>
       <div class="pt-2 flex justify-end gap-2">
         <button class="wb-btn wb-btn-ghost" data-action="archived-compare" data-id="${d.id}">对照与核实</button>
-        <button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">导出单款 ZIP</button>
+        ${d.status === 'archived' ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">导出单款 ZIP</button>` : ''}
       </div>
     `;
     container.appendChild(card);

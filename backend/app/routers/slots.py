@@ -49,6 +49,8 @@ def redo_slot(
 
         slot_type = row["slot_type"]
         design_id = row["design_id"]
+        if req.custom_prompt and slot_type == 'panorama':
+            raise HTTPException(400, '仅白底图支持自定义提示词重做')
 
         # 全景锁定红线：全景一旦通过初筛锁定，重做必须走负责人替换接口，
         # 避免下游依赖基准被静默替换且不触发级联失效。
@@ -109,6 +111,17 @@ def redo_slot(
         redo_prompt, redo_metadata = build_slot_prompt(slot_type, redo_spec, design_code, row["template_version"], depends_on)
         redo_metadata["redo_reason_category"] = req.reason_category
         redo_metadata["detail_comment"] = req.detail_comment
+        if req.custom_prompt and req.custom_prompt.strip():
+            redo_metadata['custom_prompt'] = req.custom_prompt.strip()
+            redo_metadata['prompt_author'] = user.user_id
+            redo_metadata['prompt_author_role'] = user.role
+        if slot_type == 'white_isolated':
+            redo_metadata['reference_version_id'] = depends_on
+        elif slot_type in ('twin_bed', 'nightstand_closeup'):
+            reference = conn.execute("SELECT s.current_version_id,sv.process_status FROM slots s LEFT JOIN slot_versions sv ON sv.id=s.current_version_id WHERE s.design_id=? AND s.slot_type='white_isolated'", (design_id,)).fetchone()
+            if not reference or not reference['current_version_id'] or reference['process_status'] != 'completed':
+                raise HTTPException(409, '请先完成白底组合图，再重做此图')
+            redo_metadata['reference_version_id'] = reference['current_version_id']
 
         conn.execute("""
             INSERT INTO slot_versions (

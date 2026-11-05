@@ -176,7 +176,7 @@ class TaskWorker:
                       OR EXISTS (
                           SELECT 1
                           FROM slots s2
-                          JOIN slot_versions sv2 ON s2.current_version_id = sv2.id
+                          JOIN slot_versions sv2 ON sv2.id = COALESCE(json_extract(sv.prompt_metadata, '$.reference_version_id'), s2.current_version_id)
                           WHERE s2.design_id = d.id
                             AND s2.slot_type = 'white_isolated'
                             AND sv2.process_status = 'completed'
@@ -234,11 +234,11 @@ class TaskWorker:
                 # 双床/床头近景 = 以白底清单图（white_isolated 当前版本）为参考，兜底全景。
                 prompt_metadata = json.loads(task_row["prompt_metadata"]) if task_row["prompt_metadata"] else {}
                 reference_bytes = None
-                reference_dep_id = None
+                reference_dep_id = prompt_metadata.get('reference_version_id')
                 if slot_type != "panorama":
                     if slot_type == "white_isolated":
-                        reference_dep_id = task_row["depends_on_panorama_version_id"]
-                    else:
+                        reference_dep_id = reference_dep_id or task_row["depends_on_panorama_version_id"]
+                    elif not reference_dep_id:
                         # 双床/床头近景继承白底清单图（第一张白底图）为设计依据
                         with get_db(immediate=False) as ref_conn:
                             wi_row = ref_conn.execute("""
@@ -260,10 +260,15 @@ class TaskWorker:
                             if ref_file.exists():
                                 reference_bytes = ref_file.read_bytes()
 
-                real_prompt = build_real_generation_prompt(
+                if slot_type != 'panorama' and not reference_bytes:
+                    raise ValueError('参考图片不可用，无法执行以图生图')
+                real_prompt = prompt_metadata.get('custom_prompt') or build_real_generation_prompt(
                     slot_type, structured_spec, design_code, prompt_metadata,
                     has_reference_image=reference_bytes is not None,
                 )
+                prompt_metadata.update({'prepared_prompt': real_prompt, 'reference_version_id': reference_dep_id, 'prompt_status': 'prepared'})
+                with get_db(immediate=True) as conn:
+                    conn.execute('UPDATE slot_versions SET prompt_metadata=? WHERE id=?', (json.dumps(prompt_metadata, ensure_ascii=False), slot_version_id))
                 if reference_bytes is not None:
                     ref_tag = "white_isolated" if slot_type not in ("panorama", "white_isolated") else "panorama"
                     raw_bytes, upstream_request_id = edit_image_real(
@@ -392,7 +397,7 @@ class TaskWorker:
 
                 if image_api_cfg["enabled"] and not is_stale_task:
                     # 真实模式：把实际发送的提示词与上游信息持久化到版本 metadata（可追溯）
-                    meta = json.loads(task_row["prompt_metadata"]) if task_row["prompt_metadata"] else {}
+                    meta = prompt_metadata
                     meta.update({
                         "generation_mode": "real_api",
                         "generation_pipeline": "image_edit" if reference_bytes is not None else "text2img",
@@ -400,6 +405,7 @@ class TaskWorker:
                         "upstream_model": image_api_cfg["model"],
                         "upstream_base_url": image_api_cfg["base_url"],
                         "real_prompt": real_prompt,
+                        "prompt_status": "completed",
                     })
                     conn.execute("UPDATE slot_versions SET prompt_metadata = ? WHERE id = ?",
                                  (json.dumps(meta, ensure_ascii=False), slot_version_id))
