@@ -356,12 +356,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadUpstreamQuota();
   setInterval(loadUpstreamQuota, 60000);
 
+  let polling = false;
   setInterval(async () => {
-    if (state.currentBatchId) {
+    if (!state.currentBatchId || document.hidden || polling) return;
+    polling = true;
+    try {
       await loadDesigns(false);
       await loadBudget();
+    } finally {
+      polling = false;
     }
-  }, 3000);
+  }, 8000);
 });
 
 // 角色切换（胶囊分段）

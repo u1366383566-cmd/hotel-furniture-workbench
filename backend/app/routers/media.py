@@ -1,8 +1,8 @@
 ﻿import json
 import uuid
 import sqlite3
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse, Response
 from ..database import get_db
 from ..config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
 from ..security import UserContext, get_current_user, require_roles, safe_file_path
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/api/media", tags=["Media"])
 @router.get("/preview/{version_id}")
 def get_preview_image(
     version_id: str,
+    request: Request,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
 ):
     with get_db(immediate=False) as conn:
@@ -26,7 +27,13 @@ def get_preview_image(
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="预览图文件不存在")
 
-        return FileResponse(path=file_path, media_type="image/jpeg")
+        response = FileResponse(path=file_path, media_type="image/jpeg", stat_result=file_path.stat(),
+                                headers={"Cache-Control": "private, no-cache"})
+        etag = response.headers['etag']
+        candidates = [value.strip().removeprefix('W/') for value in request.headers.get('if-none-match', '').split(',')]
+        if etag in candidates or '*' in candidates:
+            return Response(status_code=304, headers={'ETag': etag, 'Cache-Control': 'private, no-cache'})
+        return response
 
 @router.get("/raw/{version_id}")
 def get_raw_image(

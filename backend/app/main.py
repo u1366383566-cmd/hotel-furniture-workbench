@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 
@@ -60,6 +61,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class DesignListCompression:
+    """Compress the large polling response without recompressing images or ZIP files."""
+    def __init__(self, app):
+        self.app = app
+        self.compressed = GZipMiddleware(app, minimum_size=1000, compresslevel=5)
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http' and scope['path'].startswith('/api/designs/batch/'):
+            await self.compressed(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(DesignListCompression)
 
 # 注册 API 路由
 app.include_router(batches.router)
