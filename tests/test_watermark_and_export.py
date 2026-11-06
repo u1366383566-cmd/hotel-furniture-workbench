@@ -95,7 +95,7 @@ def test_preview_and_export_share_logo_renderer(client):
     assert exported.tobytes() == preview.tobytes()
 
 
-def test_watermarked_zip_export_integrity(client):
+def test_watermarked_zip_export_integrity(client, monkeypatch):
     # 创建一个批次并归档设计
     b_res = client.post("/api/batches", json={
         "name": "导出完整性测试批次",
@@ -132,6 +132,20 @@ def test_watermarked_zip_export_integrity(client):
         "expected_slot_versions": quad_version_snapshot(d_ready_for_archive),
     }, headers={"X-User-Role": "operator"})
 
+    # 打包期间其他连接仍可取得写锁。
+    import sqlite3
+    from backend.app.config import DB_PATH
+    from backend.app.routers import export as export_router
+    assemble = export_router._assemble_watermarked_zip
+    def assert_unlocked(*args):
+        conn = sqlite3.connect(str(DB_PATH), timeout=1, isolation_level=None)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('ROLLBACK')
+        finally:
+            conn.close()
+        return assemble(*args)
+    monkeypatch.setattr(export_router, '_assemble_watermarked_zip', assert_unlocked)
     # 归档后执行导出
     export_res = client.post(f"/api/export/design/{d['id']}", headers={"X-User-Role": "operator"})
     assert export_res.status_code == 200

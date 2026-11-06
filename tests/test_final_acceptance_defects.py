@@ -360,3 +360,29 @@ def test_export_records_listing(client):
     rows = listing.json()
     assert len(rows) == 1 and rows[0]["file_name"] == "export_demo.zip"
     assert rows[0]["exported_role"] == "operator" and rows[0]["file_size"] == 1234
+
+
+def test_export_records_include_older_history(client):
+    batch = create_batch(client, auto_start_panorama=False)
+    with get_db(immediate=True) as conn:
+        conn.executemany('''INSERT INTO export_records
+            (id,batch_id,export_type,file_name,file_path,file_size,exported_by,exported_role)
+            VALUES (?,?,'batch_archived_zip',?,?,1,'tester','operator')''',
+            [(f'exp_history_{i}',batch['id'],f'file_{i}.zip',f'/tmp/file_{i}.zip') for i in range(205)])
+    response = client.get(f"/api/export/records/{batch['id']}")
+    assert response.status_code == 200
+    assert len(response.json()) == 205
+
+
+def test_batch_export_records_each_design(client, tmp_path):
+    from backend.app.export_service import _record_exports
+    batch = create_batch(client, auto_start_panorama=False, designs_per_series=2)
+    with get_db(immediate=True) as conn:
+        ids = [row['id'] for row in conn.execute('SELECT id FROM designs WHERE batch_id=? LIMIT 2', (batch['id'],))]
+        assert len(ids) == 2
+        path = tmp_path / 'batch.zip'
+        path.write_bytes(b'zip')
+        _record_exports(conn, batch['id'], ids, path.name, path, 'batch_archived_zip', 'tester', 'operator')
+    rows = client.get(f"/api/export/records/{batch['id']}").json()
+    assert {row['design_id'] for row in rows} == set(ids)
+    assert {row['file_name'] for row in rows} == {'batch.zip'}

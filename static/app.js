@@ -588,9 +588,9 @@ function setupModals() {
     btn.innerText = '正在压制最终水印并打包，请稍候...';
     try {
       const res = await apiFetch(`/api/export/batch/${state.currentBatchId}`, { method: 'POST' });
-      showToast(res.message);
-      await loadExportRecords();
       await downloadAuthenticatedZip(res.download_url, res.file_name);
+      showToast(`已开始下载：${res.file_name}，请查看浏览器下载记录`);
+      await renderArchivedTab();
     } catch (e) {
       showToast(e.message, true);
     } finally {
@@ -1776,10 +1776,22 @@ function renderStandbyTab() {
 
 // ---------- 渲染 4. 已归档与导出成果 ----------
 
-function renderArchivedTab() {
+async function renderArchivedTab() {
   const container = document.getElementById('archived-designs-grid');
   container.innerHTML = '';
-  loadExportRecords();
+  const batchId = state.currentBatchId;
+
+  // Build a Set of design IDs that appear in export records so each card can
+  // show an "已导出" badge.  Also refresh the records list at the same time.
+  const exportedDesignIds = new Set();
+  try {
+    const records = await apiFetch(`/api/export/records/${batchId}`);
+    if (state.currentBatchId !== batchId) return;
+    renderExportRecords(records);
+    records.forEach(r => { if (r.design_id) exportedDesignIds.add(r.design_id); });
+  } catch (e) {}
+  if (state.currentBatchId !== batchId) return;
+
   const archived = state.designs.filter(d => ['archived', 'eliminated'].includes(d.status));
 
   if (archived.length === 0) {
@@ -1791,11 +1803,15 @@ function renderArchivedTab() {
     const card = document.createElement('div');
     card.className = 'wb-card p-4 space-y-3';
     const slots = d.slots;
+    const alreadyExported = exportedDesignIds.has(d.id);
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
         <label class="text-xs font-bold text-inkTitle font-mono">${d.status === 'archived' ? `<input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出">` : ''} ${escapeText(d.design_code)}</label>
-        <span class="wb-badge wb-badge-emerald">${d.status === 'archived' ? '✓ 已完成' : '已淘汰'}</span>
+        <div class="flex items-center gap-1.5">
+          ${alreadyExported ? '<span class="wb-badge" style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;">↓ 已导出</span>' : ''}
+          <span class="wb-badge wb-badge-emerald">${d.status === 'archived' ? '✓ 已完成' : '已淘汰'}</span>
+        </div>
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(d.structured_spec.model_title)}</div>
 
@@ -1812,7 +1828,7 @@ function renderArchivedTab() {
       <details class="workbench-details"><summary>查看完整套图与设计说明</summary><p>系列：${escapeText(d.series_name || '')}</p><p>材质：${escapeText((d.structured_spec.main_materials || []).join('、'))}</p><p>配色：${escapeText((d.structured_spec.color_scheme || []).join('、'))}</p></details>
       <div class="pt-2 flex justify-end gap-2">
         <button class="wb-btn wb-btn-ghost" data-action="archived-compare" data-id="${d.id}">对照与核实</button>
-        ${d.status === 'archived' ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">导出单款 ZIP</button>` : ''}
+        ${d.status === 'archived' ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">${alreadyExported ? '再次导出 ZIP' : '导出单款 ZIP'}</button>` : ''}
       </div>
     `;
     container.appendChild(card);
@@ -1830,9 +1846,9 @@ function renderArchivedTab() {
       b.innerText = '导出中...';
       try {
         const res = await apiFetch(`/api/export/design/${b.dataset.id}`, { method: 'POST' });
-        showToast('带水印 ZIP 导出成功');
-        await loadExportRecords();
         await downloadAuthenticatedZip(res.download_url, res.file_name);
+        showToast(`已开始下载：${res.file_name}，请查看浏览器下载记录`);
+        await renderArchivedTab();  // 刷新卡片以更新已导出标记
       } catch (e) {
         showToast(e.message, true);
       } finally {
@@ -1843,30 +1859,51 @@ function renderArchivedTab() {
   });
 }
 
-// 加载导出记录
+// 渲染导出记录列表（供 renderArchivedTab 和 loadExportRecords 复用）
+function renderExportRecords(records) {
+  const container = document.getElementById('export-records-container');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!records || records.length === 0) {
+    container.innerHTML = '<div class="text-slate-400 py-2 text-center">暂无导出记录</div>';
+    return;
+  }
+  records.forEach(r => {
+    const item = document.createElement('div');
+    item.className = 'py-1.5 border-b border-slate-100 flex items-center justify-between gap-2 last:border-b-0';
+    const sizeMb = (r.file_size / (1024 * 1024)).toFixed(2);
+    item.innerHTML = `
+      <div class="min-w-0 flex items-center gap-2">
+        <span class="font-semibold text-inkBody font-mono truncate">${escapeText(r.file_name)}</span>
+        <span class="text-[10px] text-slate-300 shrink-0">${escapeText(r.export_type)}</span>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="text-[10px] text-slate-300 whitespace-nowrap font-mono">${sizeMb} MB · ${escapeText(r.exported_by)} (${escapeText(r.exported_role)}) · ${escapeText(r.created_at)}</span>
+        <button class="wb-btn wb-btn-ghost text-[11px] px-2 py-0.5 shrink-0" data-redownload="${escapeText(r.file_name)}">↓ 再下载</button>
+      </div>
+    `;
+    container.appendChild(item);
+  });
+  // 绑定"再下载"按钮
+  container.querySelectorAll('[data-redownload]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const fname = btn.dataset.redownload;
+      try {
+        await downloadAuthenticatedZip(`/api/export/download/${fname}`, fname);
+        showToast(`已重新下载：${fname}`);
+      } catch (e) {
+        showToast(e.message, true);
+      }
+    });
+  });
+}
+
+// 加载导出记录（独立刷新入口，不含已导出标记更新）
 async function loadExportRecords() {
   if (!state.currentBatchId) return;
   try {
     const records = await apiFetch(`/api/export/records/${state.currentBatchId}`);
-    const container = document.getElementById('export-records-container');
-    container.innerHTML = '';
-    if (records.length === 0) {
-      container.innerHTML = '<div class="text-slate-400 py-2 text-center">暂无导出记录</div>';
-      return;
-    }
-    records.forEach(r => {
-      const item = document.createElement('div');
-      item.className = 'py-1.5 border-b border-slate-100 flex items-center justify-between gap-2 last:border-b-0';
-      const sizeMb = (r.file_size / (1024 * 1024)).toFixed(2);
-      item.innerHTML = `
-        <div class="min-w-0">
-          <span class="font-semibold text-inkBody font-mono">${r.file_name}</span>
-          <span class="text-[10px] text-slate-300 ml-1.5">${r.export_type}</span>
-        </div>
-        <div class="text-[10px] text-slate-300 whitespace-nowrap font-mono">${sizeMb} MB · ${r.exported_by} (${r.exported_role}) · ${r.created_at}</div>
-      `;
-      container.appendChild(item);
-    });
+    renderExportRecords(records);
   } catch (e) {}
 }
 
