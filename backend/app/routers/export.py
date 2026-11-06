@@ -165,6 +165,7 @@ def list_export_records(
 
 
 @router.get("/download/{file_name}", dependencies=[Depends(require_roles(["operator", "leader", "admin"]))])
+@router.head("/download/{file_name}", dependencies=[Depends(require_roles(["operator", "leader", "admin"]))])
 def download_export_file(
     file_name: str,
 ):

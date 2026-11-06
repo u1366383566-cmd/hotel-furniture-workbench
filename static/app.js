@@ -53,24 +53,40 @@ async function apiFetch(url, options = {}) {
 }
 
 async function downloadAuthenticatedZip(url, fallbackName) {
-  const res = await fetch(withBase(url), { headers: authHeaders(false) });
-  if (!res.ok) {
-    let message = `ZIP 下载失败 (${res.status})`;
-    try {
-      const data = await res.json();
-      message = data.detail || message;
-    } catch (e) {}
-    throw new Error(message);
-  }
-  const blob = await res.blob();
-  const objectUrl = URL.createObjectURL(blob);
+  const response = await fetch(withBase(url), {method: 'HEAD', headers: authHeaders(false), cache: 'no-store'});
+  if (!response.ok) throw new Error(response.status === 404 ? '导出文件不存在或已清理' : `下载准备失败 (${response.status})`);
   const link = document.createElement('a');
-  link.href = objectUrl;
+  link.href = withBase(url);
   link.download = fallbackName;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+}
+
+let exportInProgress = false;
+async function runZipExport(url, options, description) {
+  if (exportInProgress) { showToast('已有导出正在打包，请稍候'); return; }
+  exportInProgress = true;
+  const status = document.getElementById('export-progress');
+  const selected = document.getElementById('export-selected');
+  const batch = document.getElementById('btn-export-batch-zip');
+  selected.disabled = true; batch.disabled = true;
+  selected.textContent = '正在打包…';
+  status.classList.remove('hidden');
+  status.textContent = `正在为${description}压制水印并打包，请稍候；完成后会自动交给浏览器下载。`;
+  try {
+    const result = await apiFetch(url, options);
+    await downloadAuthenticatedZip(result.download_url, result.file_name);
+    status.textContent = `打包完成，已交给浏览器下载：${result.file_name}。请查看浏览器下载列表。`;
+    await renderArchivedTab();
+  } catch (error) {
+    status.textContent = `导出失败：${error.message}`;
+    showToast(error.message, true);
+  } finally {
+    exportInProgress = false;
+    selected.disabled = false; batch.disabled = false;
+    selected.textContent = '导出所选';
+  }
 }
 
 function showToast(text, isError = false) {
@@ -582,21 +598,7 @@ function setupModals() {
   // 导出批次 ZIP
   document.getElementById('btn-export-batch-zip').addEventListener('click', async () => {
     if (!state.currentBatchId) return;
-    const btn = document.getElementById('btn-export-batch-zip');
-    const originalText = btn.innerText;
-    btn.disabled = true;
-    btn.innerText = '正在压制最终水印并打包，请稍候...';
-    try {
-      const res = await apiFetch(`/api/export/batch/${state.currentBatchId}`, { method: 'POST' });
-      await downloadAuthenticatedZip(res.download_url, res.file_name);
-      showToast(`已开始下载：${res.file_name}，请查看浏览器下载记录`);
-      await renderArchivedTab();
-    } catch (e) {
-      showToast(e.message, true);
-    } finally {
-      btn.disabled = false;
-      btn.innerText = originalText;
-    }
+    await runZipExport(`/api/export/batch/${state.currentBatchId}`, {method:'POST'}, '本批次已归档图片');
   });
 
   document.getElementById('btn-refresh-exports').addEventListener('click', () => loadExportRecords());
@@ -1841,20 +1843,7 @@ async function renderArchivedTab() {
 
   container.querySelectorAll('.btn-export-single').forEach(b => {
     b.addEventListener('click', async () => {
-      const originalText = b.innerText;
-      b.disabled = true;
-      b.innerText = '导出中...';
-      try {
-        const res = await apiFetch(`/api/export/design/${b.dataset.id}`, { method: 'POST' });
-        await downloadAuthenticatedZip(res.download_url, res.file_name);
-        showToast(`已开始下载：${res.file_name}，请查看浏览器下载记录`);
-        await renderArchivedTab();  // 刷新卡片以更新已导出标记
-      } catch (e) {
-        showToast(e.message, true);
-      } finally {
-        b.disabled = false;
-        b.innerText = originalText;
-      }
+      await runZipExport(`/api/export/design/${b.dataset.id}`, {method:'POST'}, '所选设计');
     });
   });
 }
@@ -1890,7 +1879,7 @@ function renderExportRecords(records) {
       const fname = btn.dataset.redownload;
       try {
         await downloadAuthenticatedZip(`/api/export/download/${fname}`, fname);
-        showToast(`已重新下载：${fname}`);
+        showToast(`已交给浏览器下载：${fname}，请查看下载列表`);
       } catch (e) {
         showToast(e.message, true);
       }

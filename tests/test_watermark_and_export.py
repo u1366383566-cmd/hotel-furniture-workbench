@@ -152,6 +152,10 @@ def test_watermarked_zip_export_integrity(client, monkeypatch):
     zip_info = export_res.json()
     zip_file_name = zip_info["file_name"]
 
+    head = client.head(f"/api/export/download/{zip_file_name}", headers={"X-User-Role": "operator"})
+    assert head.status_code == 200 and not head.content
+    assert client.head('/api/export/download/missing.zip', headers={"X-User-Role": "operator"}).status_code == 404
+
     # 下载 ZIP
     dl_res = client.get(f"/api/export/download/{zip_file_name}", headers={"X-User-Role": "operator"})
     assert dl_res.status_code == 200

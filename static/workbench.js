@@ -92,8 +92,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
   document.getElementById('export-selected').addEventListener('click',async()=>{
     const ids=[...workbenchSelection.export.keys()]; if(!ids.length) return showToast('请选择已完成组',true);
-    try { const result=await apiFetch('/api/export/selected',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:ids})}); await downloadAuthenticatedZip(result.download_url,result.file_name); showToast(`已开始下载：${result.file_name}，请查看浏览器下载记录`); await renderArchivedTab(); }
-    catch(e){showToast(e.message,true);}
+    await runZipExport('/api/export/selected',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:ids})}, `所选 ${ids.length} 组图片`);
   });
   document.getElementById('budget-settings-save').addEventListener('click',async()=>{
     try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value)};

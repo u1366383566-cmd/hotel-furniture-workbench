@@ -279,6 +279,7 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .style-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .style-fields label { display:grid; gap:6px; color:#475569; font-size:12px; }
 .workbench-stats small { color:#718297; font-size:11px; line-height:1.4; }
+.export-progress { padding: 14px 16px; border: 1px solid #cbdcf1; border-radius: 12px; background: #f3f8ff; color: #244b79; font-size: 13px; line-height: 1.6; }
 .batch-edit-trigger { margin-top: 10px; }
 .batch-series-panel { margin: 18px 0 2px; padding: 20px; border: 1px solid #dfe7ef; border-radius: 14px; background: #f8fafc; }
 .batch-series-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
