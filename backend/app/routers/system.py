@@ -38,7 +38,7 @@ def suggest_series_options(series_id: str, req: SeriesOptionsRequest,
         cfg = load_text_api_config(conn)
     if not cfg['enabled'] or not cfg['has_key']:
         raise HTTPException(400, '请先配置文本模型和密钥')
-    context = json.dumps(req.rule, ensure_ascii=False)
+    context = json.dumps({k: v[:10] if isinstance(v, list) else v for k, v in req.rule.items()}, ensure_ascii=False)
     if len(context) > 80000:
         raise HTTPException(400, '系列规则内容过长')
     try:

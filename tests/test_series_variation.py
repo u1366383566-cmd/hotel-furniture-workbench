@@ -44,3 +44,12 @@ def test_history_uses_other_tasks_and_excludes_eliminated(client):
                          (design_id, 'variation-test', 'modern_business', design_id, status, json.dumps({'headboard': design_id})))
         history = series_history(conn, 'modern_business')
         assert [item['headboard'] for item in history] == ['kept']
+
+
+def test_planning_context_limits_large_option_lists_but_keeps_constraints():
+    from backend.app.routers.smart_planning import _planning_rule_context
+    rule = {'materials': [f'木材{i}' for i in range(100)], 'headboard_types': [f'床屏{i}' for i in range(100)],
+            'forbidden_elements': ['雕花'], 'description': '现代商务'}
+    context = _planning_rule_context(rule, {'main_materials': ['木材88'], 'headboard': '床屏99'})
+    assert context['materials'] == ['木材88'] and context['headboard_types'] == ['床屏99']
+    assert context['forbidden_elements'] == ['雕花'] and context['description'] == '现代商务'

@@ -67,6 +67,18 @@ def _normalize_model_output(spec):
     return spec
 
 
+def _planning_rule_context(rule, spec):
+    """规划只发送本款候选，不把几十条互斥造型全部塞进模型请求。"""
+    mapping = {'headboard_types': 'headboard', 'bed_frames': 'bed_frame',
+               'nightstands': 'nightstand', 'wardrobe_types': 'wardrobe',
+               'materials': 'main_materials', 'color_palette': 'color_scheme'}
+    result = dict(rule)
+    for key, selected in mapping.items():
+        value = spec.get(selected)
+        result[key] = value if isinstance(value, list) else [value] if value else []
+    return result
+
+
 def _rows(conn, batch_id, design_id):
     return conn.execute('''SELECT d.id, d.batch_id, d.design_code, d.series_id, d.status,
         d.structured_spec, d.verified_features, d.verified_features_version_id, d.planning_status, b.planning_confirmed,
@@ -143,15 +155,15 @@ def generate(design_id: str, req: ReplanRequest, user: UserContext = Depends(req
         previous = row['structured_spec']
         rule = (json.loads(row['series_rule_snapshot_json']) if row['series_rule_snapshot_json']
                 else json.loads(row['approved_series_rules_json'])[row['series_id']])
-        history = _rows(conn, row['batch_id'], row['id'])[:30]
+        history = _rows(conn, row['batch_id'], row['id'])[:10]
         references = []
         for h in history:
             s = json.loads(h['structured_spec'])
             if h['verified_features'] and h['verified_features_version_id'] == h['current_version_id']:
                 s.update(json.loads(h['verified_features']))
-            references.append({'code': h['design_code'], 'series': h['series_id'], **{k: s.get(k, '') for k in FIELDS}})
+            references.append({'code': h['design_code'], 'series': h['series_id'], **{k: str(s.get(k) or '')[:160] for k in FIELDS}})
         baseline = json.loads(previous)
-        context = {'series_rule': rule, 'candidate_combination': {k: baseline.get(k) for k in (*FIELDS, 'main_materials', 'color_scheme')}, 'user_requirements': row['planning_brief'], 'feedback': req.feedback,
+        context = {'series_rule': _planning_rule_context(rule, baseline), 'candidate_combination': {k: baseline.get(k) for k in (*FIELDS, 'main_materials', 'color_scheme')}, 'user_requirements': row['planning_brief'], 'feedback': req.feedback,
                    'previous_spec': json.loads(previous) if row['planning_status'] in ('ready', 'ready_append') else None, 'existing_designs': references}
     try:
         raw = chat_completion_real(cfg, SYSTEM, json.dumps(context, ensure_ascii=False), cfg['model'], cfg['timeout_seconds'])
