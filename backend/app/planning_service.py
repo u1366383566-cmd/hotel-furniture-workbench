@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import uuid
+import random
 from typing import Any, Dict, Optional
 
 
@@ -8,11 +9,47 @@ def _rule_value(rule: Dict[str, Any], key: str, default: Any) -> Any:
     return rule.get(key, default)
 
 
+def _choose_combination(rule, history):
+    fields = {'headboard': 'headboard_types', 'bed_frame': 'bed_frames',
+              'nightstand': 'nightstands', 'wardrobe': 'wardrobe_types',
+              'material': 'materials', 'color': 'color_palette'}
+    options = {key: list(dict.fromkeys(rule.get(source) or [])) for key, source in fields.items()}
+    rng = random.SystemRandom()
+    previous = []
+    for s in history:
+        if isinstance(s.get('variation_combination'), dict):
+            previous.append(s['variation_combination'])
+        previous.append({
+            'headboard': s.get('headboard'), 'bed_frame': s.get('bed_frame'),
+            'nightstand': s.get('nightstand'), 'wardrobe': s.get('wardrobe'),
+            'material': (s.get('main_materials') or [None])[0],
+            'color': (s.get('color_scheme') or [None])[0],
+        })
+    candidates = [{key: rng.choice(values) if values else '' for key, values in options.items()} for _ in range(80)]
+    def score(candidate):
+        return max((sum(bool(candidate[k]) and candidate[k] == old.get(k) for k in fields) for old in previous), default=0)
+    chosen = min(candidates, key=score)
+    insufficient = [key for key, values in options.items() if len(values) < 2]
+    return chosen, insufficient, score(chosen)
+
+
+def series_history(conn, series_id):
+    rows = conn.execute("SELECT structured_spec FROM designs WHERE series_id=? AND status != 'eliminated'", (series_id,)).fetchall()
+    history = []
+    for row in rows:
+        try:
+            history.append(json.loads(row['structured_spec']))
+        except (TypeError, ValueError):
+            continue
+    return history
+
+
 def generate_design_spec_from_rule(
     series_id: str,
     index: int,
     rule: Dict[str, Any],
     is_standby: bool = False,
+    history: Optional[list] = None,
 ) -> Dict[str, Any]:
     headboards = _rule_value(rule, "headboard_types", [])
     bed_frames = _rule_value(rule, "bed_frames", [])
@@ -23,18 +60,22 @@ def generate_design_spec_from_rule(
     if not headboards or not bed_frames or not nightstands or not wardrobes:
         raise ValueError(f"系列 {series_id} 的冻结规则缺少必备家具字段")
 
+    combination, insufficient, similarity = _choose_combination(rule, history or [])
+
     return {
         "series_id": series_id,
         "series_name": rule.get("name", series_id),
         "model_title": f"{rule.get('name', series_id)} - 方案 {index + 1}{' (候补备选)' if is_standby else ''}",
         "template_version": rule["template_version"],
-        "headboard": headboards[index % len(headboards)],
-        "bed_frame": bed_frames[(index + 1) % len(bed_frames)],
-        "nightstand": nightstands[index % len(nightstands)],
-        "wardrobe": wardrobes[index % len(wardrobes)],
-        "main_materials": materials[:2],
-        "accent_material": materials[2] if len(materials) > 2 else materials[0] if materials else "",
-        "color_scheme": colors[:3],
+        "headboard": combination['headboard'],
+        "bed_frame": combination['bed_frame'],
+        "nightstand": combination['nightstand'],
+        "wardrobe": combination['wardrobe'],
+        "main_materials": [combination['material']] if combination['material'] else [],
+        "accent_material": "",
+        "color_scheme": [combination['color']] if combination['color'] else [],
+        "variation_combination": combination,
+        "variation_warning": '部分系列选项不足或组合接近已有方案，建议补充风格规则' if insufficient or similarity >= 5 else '',
         "soft_upholstery_usage": _rule_value(rule, "soft_upholstery_usage", ""),
         "metal_usage": _rule_value(rule, "metal_usage", ""),
         "allowed_structural_changes": _rule_value(rule, "allowed_structural_changes", []),
@@ -97,7 +138,7 @@ _SLOT_OBJECTIVES = {
 }
 
 _PANORAMA_ANCHOR = (
-    "所有家具为同一系列定制家具，严格遵循系列规则的设计语言（床屏轮廓造型、板材分缝、饰面材质、五金款式、体量感与软包工艺），禁止引入规则之外的造型元素（雕花、异形装饰线条、多余金属装饰、撞色软包）；墙面、地面、天花保持低调素色基底，无装饰画、地毯花纹与多余摆件，视觉重心只留给家具；整体氛围由家具系列的材质与工艺自然呈现。"
+    "所有家具为同一系列定制家具，严格遵循系列规则的设计语言（床屏轮廓造型、板材分缝、饰面材质、五金款式、体量感与软包工艺），禁止引入规则之外的造型元素（雕花、异形装饰线条、多余金属装饰、撞色软包）；空间布局、镜头角度和柔和光线可适度变化，墙面、地面、天花保持低调素色基底，无装饰画、地毯花纹与多余摆件，家具完整清晰，整体氛围由家具系列的材质与工艺自然呈现。"
 )
 
 

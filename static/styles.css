@@ -278,6 +278,24 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .style-card button { margin-top:auto; }
 .style-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .style-fields label { display:grid; gap:6px; color:#475569; font-size:12px; }
+.style-fields textarea { height: 120px; max-height: 180px; overflow-y: auto; resize: vertical; }
+.style-fields textarea, .suggestion-list { scrollbar-width: thin; scrollbar-color: #a8bacd #f3f6fa; }
+.style-fields textarea::-webkit-scrollbar, .suggestion-list::-webkit-scrollbar { width: 7px; }
+.style-fields textarea::-webkit-scrollbar-thumb, .suggestion-list::-webkit-scrollbar-thumb { background: #a8bacd; border-radius: 8px; }
+.style-suggestions { margin-top: 18px; padding: 16px; border: 1px solid #dfe7ef; border-radius: 12px; background: #f8fafc; }
+.style-suggestions h4 { margin: 0; color: #162f4e; font-size: 14px; font-weight: 700; }
+.style-suggestions p { margin: 5px 0; color: #718297; font-size: 12px; }
+.suggestion-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.suggestion-controls label { display: grid; gap: 5px; color: #475569; font-size: 12px; }
+.suggestion-controls input { width: 80px; }
+.suggestion-list { max-height: 220px; overflow-y: auto; }
+.suggestion-list label { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; font-size: 13px; color: #334155; }
+.variation-warning { margin-top: 8px; color: #a15c0b; font-size: 12px; line-height: 1.5; }
+.style-library-nav { border: 1px solid #dfe7ef; border-radius: 14px; background: #fff; }
+.style-library-link { display: flex; width: 100%; align-items: center; gap: 12px; padding: 16px 20px; border: 0; background: transparent; text-align: left; color: #162f4e; cursor: pointer; font-weight: 700; }
+.style-library-link small { color: #718297; font-weight: 400; }
+.style-library-link > span:last-child { margin-left: auto; }
+.style-library-link.seg-active { color: var(--primary-600); }
 .workbench-stats small { color:#718297; font-size:11px; line-height:1.4; }
 .export-progress { padding: 14px 16px; border: 1px solid #cbdcf1; border-radius: 12px; background: #f3f8ff; color: #244b79; font-size: 13px; line-height: 1.6; }
 .batch-edit-trigger { margin-top: 10px; }

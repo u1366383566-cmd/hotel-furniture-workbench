@@ -56,6 +56,9 @@
       <div><span class="quota-eyebrow">IMAGE GENERATION</span><h2>上游额度汇总</h2><p>未禁用账号的额度汇总；部分账号可能因限流或异常暂不可用。</p></div>
       <div class="quota-reading"><strong id="upstream-quota-value">加载中</strong><span id="upstream-quota-time" aria-live="polite">正在查询</span><button id="upstream-quota-refresh" class="quota-refresh" type="button">刷新额度</button></div>
     </section>
+    <nav class="style-library-nav" aria-label="风格管理">
+      <button class="tab-btn style-library-link" data-tab="styles" type="button"><span>风格系列</span><small>管理系列规则与造型选项</small><span aria-hidden="true">→</span></button>
+    </nav>
     <!-- 批次状态 & 预算仪表盘 -->
     <section class="wb-card p-5">
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-4 border-b border-lineLight">
@@ -146,7 +149,6 @@
         <button class="tab-btn seg-btn seg-active" data-tab="panorama">全景 <span id="badge-pano-count" class="tab-badge">0</span></button>
         <button class="tab-btn seg-btn" data-tab="quad">四图 <span id="badge-quad-count" class="tab-badge">0</span></button>
         <button class="tab-btn seg-btn hidden" data-tab="standby">候补备选池 <span id="badge-standby-count" class="tab-badge">0</span></button>
-        <button class="tab-btn seg-btn" data-tab="styles">风格系列</button>
         <button class="tab-btn seg-btn" data-tab="archived">已完成 <span id="badge-archived-count" class="tab-badge">0</span></button>
         <button class="tab-btn seg-btn hidden" data-tab="system">管理中心</button>
       </div>
@@ -185,6 +187,17 @@
             <label>柜体造型（每行一项）<textarea id="style-wardrobes" class="wb-input" rows="3"></textarea></label>
             <label>禁用元素（每行一项）<textarea id="style-forbidden" class="wb-input" rows="3"></textarea></label>
           </div>
+          <section class="style-suggestions" aria-label="AI 辅助扩充规则">
+            <div><h4>AI 辅助扩充规则</h4><p>基于当前编辑内容生成候选，勾选后添加并保存系列。</p></div>
+            <div class="suggestion-controls">
+              <label>规则字段<select id="suggestion-field" class="wb-input"><option value="materials">材质</option><option value="color_palette">配色</option><option value="headboard_types">床屏造型</option><option value="bed_frames">床体造型</option><option value="nightstands">床头柜造型</option><option value="wardrobe_types">柜体造型</option></select></label>
+              <label>数量<input id="suggestion-count" class="wb-input" type="number" min="1" max="100" value="20"></label>
+              <button id="suggestion-generate" class="wb-btn wb-btn-dark" type="button">生成候选</button>
+            </div>
+            <p id="suggestion-status" role="status" aria-live="polite"></p>
+            <div id="suggestion-list" class="suggestion-list" aria-label="候选规则"></div>
+            <button id="suggestion-add" class="wb-btn wb-btn-ghost hidden" type="button">添加选中项到编辑框</button>
+          </section>
           <details class="workbench-details"><summary>高级规则（JSON）</summary><textarea id="series-rule-json" aria-label="系列规则 JSON" rows="9" class="wb-input font-mono leading-relaxed"></textarea></details>
           <div class="flex items-center justify-between mt-2 gap-3 flex-wrap">
             <span id="series-template-version" class="text-[11px] text-inkMuted">模板版本加载中</span>

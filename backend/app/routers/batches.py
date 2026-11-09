@@ -13,7 +13,7 @@ from ..watermark_service import ensure_watermark_config_schema
 from ..security import UserContext, get_current_user, require_roles
 from ..budget_service import get_batch_budget_summary, reserve_budget
 from ..series_rules_service import get_configured_series_rules
-from ..planning_service import build_mock_visual_features, build_slot_prompt, generate_design_spec_from_rule, get_batch_rule_snapshot
+from ..planning_service import build_mock_visual_features, build_slot_prompt, generate_design_spec_from_rule, get_batch_rule_snapshot, series_history
 from ..budget_service import BudgetHardLimitExceededError, BudgetWarningExceededError
 from .designs import _maybe_wake_standby_design
 
@@ -57,7 +57,7 @@ def expand_batch(batch_id: str, req: BatchExpandRequest,
             for offset in range(extra):
                 design_id = f'des_{uuid.uuid4().hex}'
                 code = f'AUTO-{uuid.uuid4().hex[:12].upper()}'
-                spec = generate_design_spec_from_rule(sid, index + offset, rule)
+                spec = generate_design_spec_from_rule(sid, index + offset, rule, history=series_history(conn, sid))
                 conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status,series_rule_snapshot_json) VALUES (?,?,?,?,'draft',?,?,'pending',?)", (design_id,batch_id,sid,code,json.dumps(spec,ensure_ascii=False),rule['template_version'],json.dumps(rule,ensure_ascii=False)))
                 for stype in ('panorama','white_isolated','twin_bed','nightstand_closeup'):
                     conn.execute("INSERT INTO slots (id,design_id,slot_type,status) VALUES (?,?,?,'empty')", (f'slt_{uuid.uuid4().hex}',design_id,stype))
@@ -106,10 +106,11 @@ def _generate_design_spec(
     index: int,
     configured_rules: Dict[str, Dict[str, Any]],
     is_standby: bool = False,
+    history: Optional[list] = None,
 ) -> Dict[str, Any]:
     if series_id not in configured_rules:
         raise ValueError(f"系列 {series_id} 不在批准范围")
-    return generate_design_spec_from_rule(series_id, index, configured_rules[series_id], is_standby)
+    return generate_design_spec_from_rule(series_id, index, configured_rules[series_id], is_standby, history)
 
 
 def _queue_initial_panorama(conn, batch_id: str, design_id: str, code: str) -> str:
@@ -275,7 +276,7 @@ def create_batch(
                 d_id = f"des_{uuid.uuid4().hex[:8]}"
                 code = f"{prefix}-{i+1:02d}"
                 spec = _apply_series_preference(
-                    _generate_design_spec(s_id, i, configured_rules, is_standby=False),
+                    _generate_design_spec(s_id, i, configured_rules, is_standby=False, history=series_history(conn, s_id)),
                     series_preferences, s_id,
                 )
                 
@@ -311,7 +312,7 @@ def create_batch(
                 idx = primary_count + j
                 code = f"{prefix}-STBY-{j+1:02d}"
                 spec = _apply_series_preference(
-                    _generate_design_spec(s_id, idx, configured_rules, is_standby=True),
+                    _generate_design_spec(s_id, idx, configured_rules, is_standby=True, history=series_history(conn, s_id)),
                     series_preferences, s_id,
                 )
                 

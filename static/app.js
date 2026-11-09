@@ -668,7 +668,47 @@ function setupModals() {
   });
 
   document.getElementById('series-rule-select').addEventListener('change', async () => {
+    document.getElementById('suggestion-list').replaceChildren();
+    document.getElementById('suggestion-add').classList.add('hidden');
     await loadSeriesRules();
+  });
+
+  const suggestionFields = {materials:'style-materials', color_palette:'style-colors', headboard_types:'style-headboards', bed_frames:'style-beds', nightstands:'style-nightstands', wardrobe_types:'style-wardrobes'};
+  let suggestionTarget = null;
+  document.getElementById('suggestion-generate').addEventListener('click', async event => {
+    const btn = event.currentTarget, status = document.getElementById('suggestion-status');
+    const list = document.getElementById('suggestion-list'), add = document.getElementById('suggestion-add');
+    const series = document.getElementById('series-rule-select').value;
+    const field = document.getElementById('suggestion-field').value;
+    const count = Number(document.getElementById('suggestion-count').value);
+    if (!Number.isInteger(count) || count < 1 || count > 100) { status.textContent = '请输入 1 至 100 的整数'; return; }
+    let rule;
+    try { rule = JSON.parse(document.getElementById('series-rule-json').value); }
+    catch (_) { status.textContent = '请先修正高级规则 JSON'; return; }
+    btn.disabled = true; status.textContent = '正在生成候选，请稍候…';
+    list.replaceChildren(); add.classList.add('hidden'); suggestionTarget = null;
+    try {
+      const result = await apiFetch(`/api/system/series_rules/${encodeURIComponent(series)}/suggestions`, {method:'POST', body:JSON.stringify({field, count, rule})});
+      if (document.getElementById('series-rule-select').value !== series) { status.textContent = '系列已切换，请重新生成候选'; return; }
+      suggestionTarget = {series, field};
+      for (const option of result.options) {
+        const label = document.createElement('label'), input = document.createElement('input'), text = document.createElement('span');
+        input.type = 'checkbox'; input.value = option; text.textContent = option; label.append(input, text); list.append(label);
+      }
+      status.textContent = `已生成 ${result.options.length} 条候选，请勾选需要的内容。`;
+      add.classList.remove('hidden');
+    } catch (e) { status.textContent = e.message; }
+    finally { btn.disabled = false; }
+  });
+  document.getElementById('suggestion-add').addEventListener('click', () => {
+    if (!suggestionTarget || document.getElementById('series-rule-select').value !== suggestionTarget.series) return;
+    const target = document.getElementById(suggestionFields[suggestionTarget.field]);
+    const selected = [...document.querySelectorAll('#suggestion-list input:checked')].map(input => input.value);
+    if (!selected.length) { document.getElementById('suggestion-status').textContent = '请先勾选候选'; return; }
+    const items = [...new Set([...target.value.split('\n').map(x => x.trim()).filter(Boolean), ...selected])];
+    target.value = items.join('\n'); target.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('suggestion-status').textContent = '已添加到编辑框，请保存系列规则。';
+    document.getElementById('suggestion-list').replaceChildren(); document.getElementById('suggestion-add').classList.add('hidden');
   });
 
   document.getElementById('btn-save-series-rule').addEventListener('click', async () => {
@@ -1321,6 +1361,7 @@ function renderPanoramaTab() {
             ${panoStatusBadge(d, pSlot)}
           </div>
           <div class="similarity-slot" data-similarity-slot></div>
+          ${spec.variation_warning ? `<p class="variation-warning" role="status">${escapeText(spec.variation_warning)}</p>` : ''}
           <details class="workbench-details"><summary>查看设计与提示词</summary><p>床屏：${escapeText(spec.headboard)}</p><p>床体：${escapeText(spec.bed_frame)}</p><p>床头柜：${escapeText(spec.nightstand)}</p><p>提示词：${escapeText(spec.panorama_prompt || '暂无')}</p></details>
         </div>
 

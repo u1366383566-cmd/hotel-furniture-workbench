@@ -268,6 +268,19 @@ def run_browser_verification():
             page.locator('button[data-tab="styles"]').click()
             page.wait_for_function("document.querySelector('#series-template-version').textContent.includes('当前模板版本:')")
             assert page.locator("#series-rule-json").input_value()
+            assert page.locator('.style-library-nav button[data-tab="styles"]').count() == 1
+            assert page.locator('.wb-nav-wrap button[data-tab="styles"]').count() == 0
+            page.locator('#style-cards button').first.click()
+            field = page.locator('#style-materials')
+            field.fill('\n'.join(f'测试材质{i}' for i in range(30)))
+            assert field.evaluate('(el) => el.scrollHeight > el.clientHeight')
+            page.route('**/api/system/series_rules/*/suggestions', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps({'options':['候选木材一','候选木材二']})))
+            page.locator('#suggestion-generate').click()
+            page.locator('#suggestion-list input').first.check()
+            page.locator('#suggestion-add').click()
+            assert '候选木材一' in field.input_value() and '候选木材二' not in field.input_value()
+            assert '候选木材一' in page.locator('#series-rule-json').input_value()
+            page.unroute('**/api/system/series_rules/*/suggestions')
             page.locator('button[data-tab="system"]').click()
             page.wait_for_timeout(1500)
             print("8. System protect tab opened.")
@@ -371,7 +384,7 @@ def run_browser_verification():
             export_btn = page.locator(".btn-export-single").first
             assert export_btn.is_visible(), "已归档设计应提供导出按钮"
             export_btn.click()
-            page.wait_for_selector("text=带水印 ZIP 导出成功", timeout=8000)
+            page.wait_for_selector("text=打包完成，已交给浏览器下载", timeout=8000)
             page.wait_for_timeout(800)
 
             zips = list(SERVER_EXPORTS.glob("*.zip"))
