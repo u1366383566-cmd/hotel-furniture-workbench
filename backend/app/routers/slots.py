@@ -30,7 +30,7 @@ def redo_slot(
         cur.execute("""
             SELECT s.id, s.design_id, s.slot_type, s.current_version_id, s.redo_count,
                    d.batch_id, d.design_code, d.total_redo_count, d.status as design_status,
-                   d.structured_spec, d.template_version
+                   d.structured_spec, d.template_version, d.series_id
             FROM slots s
             JOIN designs d ON s.design_id = d.id
             WHERE s.id = ?
@@ -108,7 +108,14 @@ def redo_slot(
         max_v = cur.fetchone()["mv"] or 1
         new_vid = f"ver_{uuid.uuid4().hex[:8]}"
         redo_spec = json.loads(row["structured_spec"])
+        if slot_type == 'panorama':
+            from ..planning_service import redo_panorama_view
+            view, changed = redo_panorama_view(conn, redo_spec, design_id, batch_id, row['series_id'], curr_vid, req.detail_comment)
+            if view:
+                redo_spec['panorama_view'] = view
         redo_prompt, redo_metadata = build_slot_prompt(slot_type, redo_spec, design_code, row["template_version"], depends_on)
+        if slot_type == 'panorama' and changed:
+            redo_metadata['panorama_view_changed'] = True
         redo_metadata["redo_reason_category"] = req.reason_category
         redo_metadata["detail_comment"] = req.detail_comment
         if req.custom_prompt and req.custom_prompt.strip():

@@ -2,11 +2,52 @@ import json
 import sqlite3
 import uuid
 import random
+import re
 from typing import Any, Dict, Optional
 
 
 def _rule_value(rule: Dict[str, Any], key: str, default: Any) -> Any:
     return rule.get(key, default)
+
+
+PANORAMA_VIEWS = {
+    'front': ('正面广角', '从床尾正面向床屏拍摄，适度广角呈现床与两侧家具'),
+    'left': ('左侧斜向', '从客房左前侧向床区拍摄，展示床与配套家具的空间层次'),
+    'right': ('右侧斜向', '从客房右前侧向床区拍摄，展示床与配套家具的空间层次'),
+    'entry': ('入口方向', '从客房入口向室内拍摄，兼顾床区和办公收纳家具'),
+    'window': ('临窗方向', '从临窗区域向室内拍摄，兼顾床区及入口侧家具'),
+}
+
+
+def choose_panorama_view(history, batch_id=None, exclude=None):
+    known = [s for s in history if isinstance(s.get('panorama_view'), dict) and s['panorama_view'].get('id') in PANORAMA_VIEWS]
+    recent = known[:30]
+    candidates = [key for key in PANORAMA_VIEWS if key != exclude]
+    def score(key):
+        same_batch = sum(s.get('_batch_id') == batch_id and s['panorama_view']['id'] == key for s in known) if batch_id else 0
+        total = sum(s['panorama_view']['id'] == key for s in recent)
+        return same_batch, total
+    key = min(candidates, key=score)
+    label, instruction = PANORAMA_VIEWS[key]
+    return {'id': key, 'label': label, 'instruction': instruction}
+
+
+def redo_panorama_view(conn, spec, design_id, batch_id, series_id, version_id, comment):
+    current = spec.get('panorama_view')
+    if version_id:
+        row = conn.execute('SELECT prompt_metadata FROM slot_versions WHERE id=?', (version_id,)).fetchone()
+        if row and row['prompt_metadata']:
+            current = json.loads(row['prompt_metadata']).get('panorama_view', current)
+    text = (comment or '').strip()
+    change = bool(re.search(r'(换|更换|改变|调整|变换|重新|改成|改为)[^，。；,;\n]{0,8}(视角|角度|机位|镜头|方向)|(视角|角度|机位|镜头|方向)[^，。；,;\n]{0,8}(换|更换|改变|调整|变换|重新|改成|改为)', text))
+    if re.search(r'(不要|不需要|无需|不必|保持|保留).{0,6}(换|更换|改变|调整|变换|改).{0,6}(视角|角度|机位|镜头|方向)', text):
+        change = False
+    if change:
+        history = [s for s in series_history(conn, series_id) if s.get('_design_id') != design_id]
+        current = choose_panorama_view(history, batch_id, (current or {}).get('id'))
+        spec['panorama_view'] = current
+        conn.execute('UPDATE designs SET structured_spec=? WHERE id=?', (json.dumps(spec, ensure_ascii=False), design_id))
+    return current, change
 
 
 def _choose_combination(rule, history):
@@ -34,11 +75,14 @@ def _choose_combination(rule, history):
 
 
 def series_history(conn, series_id):
-    rows = conn.execute("SELECT structured_spec FROM designs WHERE series_id=? AND status != 'eliminated'", (series_id,)).fetchall()
+    rows = conn.execute("SELECT id,batch_id,structured_spec FROM designs WHERE series_id=? AND status != 'eliminated' ORDER BY created_at DESC, rowid DESC", (series_id,)).fetchall()
     history = []
     for row in rows:
         try:
-            history.append(json.loads(row['structured_spec']))
+            spec = json.loads(row['structured_spec'])
+            spec['_batch_id'] = row['batch_id']
+            spec['_design_id'] = row['id']
+            history.append(spec)
         except (TypeError, ValueError):
             continue
     return history
@@ -50,6 +94,7 @@ def generate_design_spec_from_rule(
     rule: Dict[str, Any],
     is_standby: bool = False,
     history: Optional[list] = None,
+    batch_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     headboards = _rule_value(rule, "headboard_types", [])
     bed_frames = _rule_value(rule, "bed_frames", [])
@@ -75,6 +120,7 @@ def generate_design_spec_from_rule(
         "accent_material": "",
         "color_scheme": [combination['color']] if combination['color'] else [],
         "variation_combination": combination,
+        "panorama_view": choose_panorama_view(history or [], batch_id),
         "variation_warning": '部分系列选项不足或组合接近已有方案，建议补充风格规则' if insufficient or similarity >= 5 else '',
         "soft_upholstery_usage": _rule_value(rule, "soft_upholstery_usage", ""),
         "metal_usage": _rule_value(rule, "metal_usage", ""),
@@ -120,6 +166,8 @@ def build_slot_prompt(
         "depends_on_panorama_version_id": panorama_version_id,
         "rule_snapshot_locked": True,
     }
+    if slot_type == 'panorama' and structured_spec.get('panorama_view'):
+        metadata['panorama_view'] = structured_spec['panorama_view']
     prompt = (
         "LOCAL MOCK VISUAL PROTOTYPE - OFFLINE ONLY. DO NOT SEND TO NETWORK.\n"
         f"Slot: {slot_type}\nObjective: {metadata['slot_objective']}\n"
@@ -209,19 +257,23 @@ def build_real_generation_prompt(
         lines.append("构图要求：正方形 1:1，写实商业产品摄影质感，均匀柔和的影棚布光，轻微投影。")
     else:
         # ---- 文生图提示词（全景）----
+        view = meta.get('panorama_view', structured_spec.get('panorama_view')) if slot_type == 'panorama' else None
+        view_line = ('本次全景镜头要求（忽略其他与本要求冲突的机位和视角描述）：' + view['instruction'] + '；床、床屏、床头柜和配套家具尽量完整清晰。') if isinstance(view, dict) and view.get('instruction') else ''
         if slot_type == 'panorama' and structured_spec.get('panorama_prompt'):
             custom = structured_spec['panorama_prompt'].strip()
             reason = meta.get('redo_reason_category')
             if reason:
                 custom += '\n本次重做需修正：' + str(reason) + ' ' + str(meta.get('detail_comment') or '')
             coverage = _panorama_coverage_line(structured_spec)
-            out = custom + '\n' + _PANORAMA_ANCHOR
+            out = custom + ('\n' + view_line if view_line else '') + '\n' + _PANORAMA_ANCHOR
             if coverage:
                 out += '\n' + coverage
             return out + '\n家具须作为统一系列完整呈现：让方案中的床、床屏、床头柜及配套家具在画面内尽可能完整、清晰可辨，避免被画面边缘裁切或大面积遮挡，以便后续提取为白底产品展板。\n构图要求：正方形 1:1，画面中不得出现任何文字、水印、LOGO 或人物。'
         lines = [f"为酒店家具定制方案「{design_code}」生成{_SLOT_OBJECTIVES.get(slot_type, ' Approved hotel furniture visual.')}",
                  "构图要求：正方形 1:1，写实商业摄影质感，柔和均匀布光，高级酒店样板间水准。方案内家具尽可能完整清晰可辨，避免裁切和遮挡，以便后续提取产品。"]
 
+        if view_line:
+            lines.insert(0, view_line)
         furniture = (
             f"家具组合：床屏={structured_spec.get('headboard', '')}；"
             f"床体={structured_spec.get('bed_frame', '')}；"

@@ -1362,7 +1362,7 @@ function renderPanoramaTab() {
           </div>
           <div class="similarity-slot" data-similarity-slot></div>
           ${spec.variation_warning ? `<p class="variation-warning" role="status">${escapeText(spec.variation_warning)}</p>` : ''}
-          <details class="workbench-details"><summary>查看设计与提示词</summary><p>床屏：${escapeText(spec.headboard)}</p><p>床体：${escapeText(spec.bed_frame)}</p><p>床头柜：${escapeText(spec.nightstand)}</p><p>提示词：${escapeText(spec.panorama_prompt || '暂无')}</p></details>
+          <details class="workbench-details"><summary>查看设计与提示词</summary><p>视角：${escapeText(curVer?.prompt_metadata?.panorama_view?.label || spec.panorama_view?.label || '历史方案未记录')}</p><p>床屏：${escapeText(spec.headboard)}</p><p>床体：${escapeText(spec.bed_frame)}</p><p>床头柜：${escapeText(spec.nightstand)}</p><p>提示词：${escapeText(spec.panorama_prompt || '暂无')}</p></details>
         </div>
 
         <div class="pt-3 border-t border-slate-100 flex items-center gap-2">

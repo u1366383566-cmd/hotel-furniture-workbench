@@ -378,7 +378,13 @@ def review_panorama(
             max_v = cur.fetchone()["mv"] or 1
             new_vid = f"ver_{uuid.uuid4().hex[:8]}"
             redo_spec = json.loads(d_row["structured_spec"])
+            from ..planning_service import redo_panorama_view
+            view, changed = redo_panorama_view(conn, redo_spec, design_id, batch_id, series_id, curr_vid, req.detail_comment)
+            if view:
+                redo_spec['panorama_view'] = view
             redo_prompt, redo_metadata = build_slot_prompt("panorama", redo_spec, design_code, d_row["template_version"])
+            if changed:
+                redo_metadata['panorama_view_changed'] = True
             redo_metadata["redo_reason_category"] = req.reason_category
             redo_metadata["detail_comment"] = req.detail_comment
 

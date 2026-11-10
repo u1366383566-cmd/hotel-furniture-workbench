@@ -57,7 +57,7 @@ def expand_batch(batch_id: str, req: BatchExpandRequest,
             for offset in range(extra):
                 design_id = f'des_{uuid.uuid4().hex}'
                 code = f'AUTO-{uuid.uuid4().hex[:12].upper()}'
-                spec = generate_design_spec_from_rule(sid, index + offset, rule, history=series_history(conn, sid))
+                spec = generate_design_spec_from_rule(sid, index + offset, rule, history=series_history(conn, sid), batch_id=batch_id)
                 conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status,series_rule_snapshot_json) VALUES (?,?,?,?,'draft',?,?,'pending',?)", (design_id,batch_id,sid,code,json.dumps(spec,ensure_ascii=False),rule['template_version'],json.dumps(rule,ensure_ascii=False)))
                 for stype in ('panorama','white_isolated','twin_bed','nightstand_closeup'):
                     conn.execute("INSERT INTO slots (id,design_id,slot_type,status) VALUES (?,?,?,'empty')", (f'slt_{uuid.uuid4().hex}',design_id,stype))
@@ -107,10 +107,11 @@ def _generate_design_spec(
     configured_rules: Dict[str, Dict[str, Any]],
     is_standby: bool = False,
     history: Optional[list] = None,
+    batch_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if series_id not in configured_rules:
         raise ValueError(f"系列 {series_id} 不在批准范围")
-    return generate_design_spec_from_rule(series_id, index, configured_rules[series_id], is_standby, history)
+    return generate_design_spec_from_rule(series_id, index, configured_rules[series_id], is_standby, history, batch_id)
 
 
 def _queue_initial_panorama(conn, batch_id: str, design_id: str, code: str) -> str:
@@ -276,7 +277,7 @@ def create_batch(
                 d_id = f"des_{uuid.uuid4().hex[:8]}"
                 code = f"{prefix}-{i+1:02d}"
                 spec = _apply_series_preference(
-                    _generate_design_spec(s_id, i, configured_rules, is_standby=False, history=series_history(conn, s_id)),
+                    _generate_design_spec(s_id, i, configured_rules, is_standby=False, history=series_history(conn, s_id), batch_id=batch_id),
                     series_preferences, s_id,
                 )
                 
@@ -312,7 +313,7 @@ def create_batch(
                 idx = primary_count + j
                 code = f"{prefix}-STBY-{j+1:02d}"
                 spec = _apply_series_preference(
-                    _generate_design_spec(s_id, idx, configured_rules, is_standby=True, history=series_history(conn, s_id)),
+                    _generate_design_spec(s_id, idx, configured_rules, is_standby=True, history=series_history(conn, s_id), batch_id=batch_id),
                     series_preferences, s_id,
                 )
                 
@@ -631,7 +632,7 @@ def append_standby_designs(
             for k in range(count_per_series):
                 d_id = f"des_{uuid.uuid4().hex[:8]}"
                 code = f"{prefix}-STBY-{existing_count + k + 1:02d}"
-                spec = _generate_design_spec(s_id, existing_count + k, snapshot, is_standby=True)
+                spec = _generate_design_spec(s_id, existing_count + k, snapshot, is_standby=True, history=series_history(conn, s_id), batch_id=batch_id)
 
                 conn.execute("""
                     INSERT INTO designs (id, batch_id, series_id, design_code, is_standby, status, structured_spec, template_version)

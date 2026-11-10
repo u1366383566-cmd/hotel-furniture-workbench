@@ -18,7 +18,7 @@ def queue_replacement(conn, batch_id, series_id, source_design_id=None):
     if series_id not in rules:
         return None
     index = conn.execute('SELECT COUNT(*) AS n FROM designs WHERE batch_id=? AND series_id=?', (batch_id, series_id)).fetchone()['n']
-    spec = generate_design_spec_from_rule(series_id, index, rules[series_id], history=series_history(conn, series_id))
+    spec = generate_design_spec_from_rule(series_id, index, rules[series_id], history=series_history(conn, series_id), batch_id=batch_id)
     design_id = f'des_{uuid.uuid4().hex[:12]}'
     code = f'AUTO-{uuid.uuid4().hex[:8].upper()}'
     conn.execute("INSERT INTO designs (id,batch_id,series_id,design_code,status,structured_spec,template_version,planning_status,series_rule_snapshot_json) VALUES (?,?,?,?,'draft',?,?,'pending',?)",
