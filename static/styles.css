@@ -291,9 +291,10 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .suggestion-list { max-height: 220px; overflow-y: auto; }
 .suggestion-list label { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; font-size: 13px; color: #334155; }
 .variation-warning { margin-top: 8px; color: #a15c0b; font-size: 12px; line-height: 1.5; }
-.style-library-nav { border: 1px solid #dfe7ef; border-radius: 14px; background: #fff; }
-.style-library-link { display: flex; width: 100%; align-items: center; gap: 12px; padding: 16px 20px; border: 0; background: transparent; text-align: left; color: #162f4e; cursor: pointer; font-weight: 700; }
-.style-library-link small { color: #718297; font-weight: 400; }
+.style-library-nav { border: 1px solid #8db5db; border-radius: 14px; background: #e6f1fb; box-shadow: inset 4px 0 0 #24669d; }
+.style-library-link { display: flex; width: 100%; align-items: center; gap: 12px; padding: 16px 20px; border: 0; background: transparent; text-align: left; color: #123f69; cursor: pointer; font-weight: 700; }
+.style-library-link:hover { background: #d5eafa; border-radius: 13px; }
+.style-library-link small { color: #365f83; font-weight: 400; }
 .style-library-link > span:last-child { margin-left: auto; }
 .style-library-link.seg-active { color: var(--primary-600); }
 .workbench-stats small { color:#718297; font-size:11px; line-height:1.4; }

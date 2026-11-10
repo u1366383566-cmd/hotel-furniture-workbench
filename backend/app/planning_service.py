@@ -186,7 +186,7 @@ _SLOT_OBJECTIVES = {
 }
 
 _PANORAMA_ANCHOR = (
-    "所有家具为同一系列定制家具，严格遵循系列规则的设计语言（床屏轮廓造型、板材分缝、饰面材质、五金款式、体量感与软包工艺），禁止引入规则之外的造型元素（雕花、异形装饰线条、多余金属装饰、撞色软包）；空间布局、镜头角度和柔和光线可适度变化，墙面、地面、天花保持低调素色基底，无装饰画、地毯花纹与多余摆件，家具完整清晰，整体氛围由家具系列的材质与工艺自然呈现。"
+    "本款家具保持系列风格协调，同时清晰呈现本方案指定的床屏、床体、柜体造型及材质配色，让不同方案在家具外观上各有特点；严格遵循本系列实际的禁用元素和禁用工艺，不凭空增加统一的造型禁令。空间布局、镜头角度和柔和光线可适度变化，环境保持克制，家具完整清晰，整体氛围由本款家具的材质与工艺自然呈现。"
 )
 
 
@@ -266,6 +266,8 @@ def build_real_generation_prompt(
                 custom += '\n本次重做需修正：' + str(reason) + ' ' + str(meta.get('detail_comment') or '')
             coverage = _panorama_coverage_line(structured_spec)
             out = custom + ('\n' + view_line if view_line else '') + '\n' + _PANORAMA_ANCHOR
+            if forbidden or processes:
+                out += '\n本系列禁止元素：' + '、'.join(forbidden) + '；禁止工艺：' + '、'.join(processes)
             if coverage:
                 out += '\n' + coverage
             return out + '\n家具须作为统一系列完整呈现：让方案中的床、床屏、床头柜及配套家具在画面内尽可能完整、清晰可辨，避免被画面边缘裁切或大面积遮挡，以便后续提取为白底产品展板。\n构图要求：正方形 1:1，画面中不得出现任何文字、水印、LOGO 或人物。'

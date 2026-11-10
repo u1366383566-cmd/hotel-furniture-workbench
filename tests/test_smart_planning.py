@@ -79,7 +79,7 @@ def test_planning_confirm_start_retry_and_review(client, monkeypatch):
     prompt = build_real_generation_prompt('panorama', changed, 'TEST')
     assert prompt.startswith('人工修改后的提示词')
     assert '正方形 1:1' in prompt
-    assert '禁止引入规则之外的造型元素' in prompt
+    assert '清晰呈现本方案指定的床屏' in prompt
     assert client.post(f'/api/planning/batch/{batch}/confirm', headers=LEADER, json={'expected_specs': {}}).status_code == 409
     assert confirm(client, batch).status_code == 200
     assert client.post(f'/api/planning/design/{first}/generate', headers=LEADER, json={}).status_code == 409
@@ -156,7 +156,7 @@ def test_confirmed_prompt_is_sent_to_image_adapter(client, monkeypatch):
     monkeypatch.setattr('backend.app.task_worker.generate_image_real', generate)
     assert worker_instance.process_next_task()
     assert calls and calls[0].startswith(proposal()['panorama_prompt'])
-    assert calls[0].index('禁止引入规则之外的造型元素') < calls[0].index('家具须作为统一系列完整呈现')
+    assert calls[0].index('清晰呈现本方案指定的床屏') < calls[0].index('家具须作为统一系列完整呈现')
     with get_db() as conn:
         version = conn.execute('SELECT prompt_metadata FROM slot_versions WHERE design_id=?', (design['id'],)).fetchone()
         assert json.loads(version['prompt_metadata'])['real_prompt'] == calls[0]
@@ -164,7 +164,14 @@ def test_confirmed_prompt_is_sent_to_image_adapter(client, monkeypatch):
 
 def test_rule_based_panorama_has_anchor():
     prompt = build_real_generation_prompt('panorama', {'headboard': '木饰面床屏'}, 'TEST')
-    assert '禁止引入规则之外的造型元素' in prompt
+    assert '清晰呈现本方案指定的床屏' in prompt
+
+
+def test_panorama_uses_actual_series_restrictions():
+    spec = {'panorama_prompt': '窗边的蓝色床屏', 'forbidden_elements': ['雕花'], 'forbidden_processes': ['高光烤漆']}
+    prompt = build_real_generation_prompt('panorama', spec, 'TEST')
+    assert '本系列禁止元素：雕花；禁止工艺：高光烤漆' in prompt
+    assert '禁止引入规则之外的造型元素（雕花、异形装饰线条' not in prompt
 
 
 def test_panorama_coverage_line_lists_companion_items():
