@@ -1152,6 +1152,9 @@ function renderStyleCards(rules) {
     const description = document.createElement('p'); description.textContent = rule.description || rule.hotel_mood || '暂无风格说明';
     const materials = document.createElement('p'); materials.textContent = `材质：${(rule.materials || []).join('、') || '未设置'}`;
     const colors = document.createElement('p'); colors.textContent = `配色：${(rule.color_palette || []).join('、') || '未设置'}`;
+    const content = document.createElement('div'); content.className = 'style-card-content'; content.tabIndex = 0;
+    content.setAttribute('aria-label', `${rule.name || id}的系列介绍、材质和配色`);
+    content.append(description, materials, colors);
     const edit = document.createElement('button'); edit.className = 'wb-btn wb-btn-ghost'; edit.type = 'button'; edit.textContent = '编辑系列';
     edit.onclick = async () => {
       const select = document.getElementById('series-rule-select'); select.value = id;
@@ -1159,7 +1162,7 @@ function renderStyleCards(rules) {
       await loadSeriesRules(); document.getElementById('style-editor').classList.remove('hidden');
       document.getElementById('style-editor').scrollIntoView({behavior:'smooth', block:'start'});
     };
-    card.append(title, description, materials, colors, edit); container.appendChild(card);
+    card.append(title, content, edit); container.appendChild(card);
   }
 }
 
