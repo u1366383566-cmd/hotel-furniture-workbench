@@ -70,6 +70,23 @@ def _ensure_columns(conn: sqlite3.Connection):
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_designs_product_number ON designs(product_number) WHERE product_number IS NOT NULL')
     conn.execute('CREATE TABLE IF NOT EXISTS product_number_state (id INTEGER PRIMARY KEY CHECK(id=1), ready INTEGER NOT NULL, last_number INTEGER NOT NULL)')
     conn.execute("INSERT OR IGNORE INTO product_number_state VALUES (1, CASE WHEN EXISTS (SELECT 1 FROM designs WHERE status='archived') THEN 0 ELSE 1 END, 0)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS nas_upload_jobs (
+        id TEXT PRIMARY KEY, design_id TEXT NOT NULL UNIQUE REFERENCES designs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'queued', error TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')))
+    """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS nas_upload_items (
+        job_id TEXT NOT NULL REFERENCES nas_upload_jobs(id) ON DELETE CASCADE,
+        slot_type TEXT NOT NULL, filename TEXT NOT NULL, sha256 TEXT NOT NULL,
+        byte_count INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        PRIMARY KEY(job_id,slot_type))
+    """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS nas_upload_attempts (
+        job_id TEXT NOT NULL REFERENCES nas_upload_jobs(id) ON DELETE CASCADE,
+        attempt INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        finished_at TEXT, status TEXT, error TEXT, PRIMARY KEY(job_id,attempt))
+    """)
     add_col_if_missing('slot_versions', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('slot_versions', 'prompt_metadata', 'TEXT')
     add_col_if_missing('slot_versions', 'mock_visual_features', 'TEXT')

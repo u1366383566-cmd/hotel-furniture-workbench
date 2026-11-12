@@ -1855,6 +1855,8 @@ async function renderArchivedTab() {
     card.className = 'wb-card p-4 space-y-3';
     const slots = d.slots;
     const alreadyExported = exportedDesignIds.has(d.id);
+    const nasStatus = {queued:'待上传',uploading:'上传中',verifying:'核验中',waiting:'等待核验',success:'上传成功',failed:'上传失败',conflict:'上传冲突'};
+    const nas = d.nas_upload;
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
@@ -1865,6 +1867,7 @@ async function renderArchivedTab() {
         </div>
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(d.structured_spec.model_title)}</div>
+      ${d.status === 'archived' && d.product_code ? `<div class="text-xs text-inkBody">NAS：${escapeText(nas ? (nasStatus[nas.status] || nas.status) : '未上传')}${nas?.items?.length ? ` · 已核验 ${nas.items.filter(item => item.status === 'verified').length}/4` : ''}${nas?.error ? ` · ${escapeText(nas.error)}` : ''}</div>` : ''}
 
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
         ${['panorama', 'white_isolated', 'twin_bed', 'nightstand_closeup'].map(stype => {
@@ -1879,6 +1882,7 @@ async function renderArchivedTab() {
       <details class="workbench-details"><summary>查看完整套图与设计说明</summary><p>系列：${escapeText(d.series_name || '')}</p><p>材质：${escapeText((d.structured_spec.main_materials || []).join('、'))}</p><p>配色：${escapeText((d.structured_spec.color_scheme || []).join('、'))}</p></details>
       <div class="pt-2 flex justify-end gap-2">
         <button class="wb-btn wb-btn-ghost" data-action="archived-compare" data-id="${d.id}">对照与核实</button>
+        ${d.status === 'archived' && d.product_code && (!nas || ['failed','conflict','waiting'].includes(nas.status)) ? `<button class="btn-nas-upload wb-btn wb-btn-ghost" data-id="${d.id}">${nas ? '重试上传' : '上传到 NAS'}</button>` : ''}
         ${d.status === 'archived' && d.product_code ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">${alreadyExported ? '再次导出 ZIP' : '导出单款 ZIP'}</button>` : ''}
       </div>
     `;
@@ -1895,6 +1899,12 @@ async function renderArchivedTab() {
       await runZipExport(`/api/export/design/${b.dataset.id}`, {method:'POST'}, '所选设计');
     });
   });
+  container.querySelectorAll('.btn-nas-upload').forEach(b => b.addEventListener('click', async () => {
+    try { const result=await apiFetch('/api/nas-upload/enqueue',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:[b.dataset.id]})});
+      if (!result.results[0]?.ok) throw new Error(result.results[0]?.error || '无法加入上传');
+      showToast('已加入 NAS 上传任务'); await loadDesigns(true);
+    } catch(e) { showToast(e.message,true); }
+  }));
 }
 
 // 渲染导出记录列表（供 renderArchivedTab 和 loadExportRecords 复用）

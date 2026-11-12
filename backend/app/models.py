@@ -108,6 +108,7 @@ class DesignDetail(BaseModel):
     series_name: str
     design_code: str
     product_code: Optional[str] = None
+    nas_upload: Optional[Dict[str, Any]] = None
     is_standby: bool
     status: str
     planning_status: str = 'legacy'

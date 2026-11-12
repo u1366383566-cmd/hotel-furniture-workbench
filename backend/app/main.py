@@ -17,6 +17,8 @@ from .security import UserContext, get_current_user, AUTH_MODE
 from .image_adapter import load_image_api_config, load_text_api_config
 from .task_worker import worker_instance
 from .auto_planning_service import planner_worker
+from .nas_upload_service import nas_worker
+from .routers import nas_upload
 from .routers import batches, designs, slots, export, media, system, smart_planning, workbench
 from .budget_service import BudgetHardLimitExceededError, BudgetWarningExceededError
 from fastapi.requests import Request
@@ -33,11 +35,13 @@ async def lifespan(app: FastAPI):
     logger.info("Image and text API modes are determined by the configured upstreams")
     await worker_instance.start()
     await planner_worker.start()
+    await nas_worker.start()
     yield
     # 关闭阶段
     logger.info("Stopping background TaskWorker...")
     await worker_instance.stop()
     await planner_worker.stop()
+    await nas_worker.stop()
 
 app = FastAPI(
     title="酒店家具智能套图工作台 (Hotel Furniture Workbench)",
@@ -86,6 +90,7 @@ app.include_router(media.router)
 app.include_router(system.router)
 app.include_router(smart_planning.router)
 app.include_router(workbench.router)
+app.include_router(nas_upload.router)
 
 PUBLIC_BASE = os.environ.get("WORKBENCH_PUBLIC_BASE", "").rstrip("/")
 STATIC_DIR = BASE_DIR / "static"

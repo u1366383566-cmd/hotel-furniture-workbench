@@ -94,6 +94,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     const ids=[...workbenchSelection.export.keys()]; if(!ids.length) return showToast('请选择已完成组',true);
     await runZipExport('/api/export/selected',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:ids})}, `所选 ${ids.length} 组图片`);
   });
+  document.getElementById('nas-upload-selected').addEventListener('click',async()=>{
+    const ids=[...workbenchSelection.export.keys()]; if(!ids.length) return showToast('请选择已编号归档组',true);
+    try { const result=await apiFetch('/api/nas-upload/enqueue',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:ids})});
+      const ok=result.results.filter(x=>x.ok).length; showToast(`已加入或保留 ${ok} 组上传任务${ok<ids.length ? `，${ids.length-ok} 组未加入` : ''}`,ok<ids.length); await loadDesigns(true);
+    } catch(e){showToast(e.message,true);}
+  });
   document.getElementById('budget-settings-save').addEventListener('click',async()=>{
     try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value)};
       await apiFetch('/api/workbench/budget-settings',{method:'PUT',body:JSON.stringify(body)}); showToast('新任务默认额度已保存');

@@ -18,6 +18,7 @@ from ..config import DEFAULT_REDO_SLOT_LIMIT, DEFAULT_REDO_DESIGN_LIMIT, RAW_IMA
 from ..watermark_service import apply_watermark
 from ..planning_service import build_mock_visual_features, build_slot_prompt
 from ..product_numbering import format_product_code, allocate_product_number
+from ..nas_upload_service import enqueue_upload
 
 router = APIRouter(prefix="/api/designs", tags=["Designs"])
 
@@ -88,6 +89,10 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
 
     spec = json.loads(d_row["structured_spec"]) if d_row["structured_spec"] else {}
     v_features = json.loads(d_row["visual_features"]) if d_row["visual_features"] else None
+    upload_row = conn.execute('SELECT id,status,error,attempts,updated_at FROM nas_upload_jobs WHERE design_id=?', (design_id,)).fetchone()
+    upload = dict(upload_row) if upload_row else None
+    if upload:
+        upload['items'] = [dict(r) for r in conn.execute('SELECT slot_type,filename,status FROM nas_upload_items WHERE job_id=? ORDER BY filename', (upload['id'],))]
 
     return DesignDetail(
         id=d_row["id"],
@@ -96,6 +101,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         series_name=spec.get("series_name", d_row["series_id"]),
         design_code=d_row["design_code"],
         product_code=format_product_code(d_row['product_number']) if d_row['product_number'] is not None else None,
+        nas_upload=upload,
         is_standby=bool(d_row["is_standby"]),
         status=d_row["status"],
         planning_status=d_row["planning_status"],
@@ -707,6 +713,7 @@ def review_quad(
             SET status = 'archived', product_number = ?, archived_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime')
             WHERE id = ?
         """, (number, design_id))
+        enqueue_upload(conn, design_id)
         conn.execute("UPDATE batches SET current_archived_count = current_archived_count + 1 WHERE id = ?", (batch_id,))
 
         b_curr = cur.execute(

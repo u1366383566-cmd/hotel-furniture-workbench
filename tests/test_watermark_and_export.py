@@ -167,6 +167,7 @@ def test_watermarked_zip_export_integrity(client, monkeypatch):
         file_list = zf.namelist()
         archived = client.get(f"/api/designs/{d['id']}").json()
         code = archived['product_code']
+        assert archived['nas_upload']['status'] == 'waiting'
         from backend.app.product_numbering import product_image_name
         number = int(code[4:])
         # 必须包含 4 张规范命名的槽位图及元数据

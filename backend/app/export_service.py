@@ -17,6 +17,27 @@ from .security import safe_file_path
 from .product_numbering import format_product_code, product_image_name, SLOT_ORDER
 
 
+def render_product_images(wm_cfg, design):
+    """Return exactly the same named watermarked PNG bytes for ZIP and NAS."""
+    result = []
+    for slot in sorted(design['slots'], key=lambda item: SLOT_ORDER[item['slot_type']]):
+        raw_name = slot['raw_image_path']
+        if not raw_name:
+            raise ValueError(f"设计 {design['design_code']} 槽位 {slot['slot_type']} 缺少原图路径")
+        raw_path = safe_file_path(RAW_IMAGES_DIR, raw_name)
+        if not raw_path.exists():
+            raise FileNotFoundError(f'原图文件未找到: {raw_name}')
+        try:
+            with Image.open(raw_path) as img:
+                image = apply_watermark(img, watermark_cfg=wm_cfg)
+                buf = io.BytesIO()
+                image.save(buf, format='PNG', compress_level=1)
+        except Exception as exc:
+            raise RuntimeError(f'水印施加失败，导出已硬阻断: {exc}') from exc
+        result.append((slot['slot_type'], product_image_name(design['product_number'], design['archived_at'], slot['slot_type']), buf.getvalue()))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 – Read-only DB access: validate designs and collect all data needed
 # ---------------------------------------------------------------------------
@@ -106,29 +127,9 @@ def _assemble_watermarked_zip(wm_cfg, designs_data: list, batch_id: str) -> tupl
     try:
         for d in designs_data:
             design_code = d["design_code"]
-            for sr in sorted(d["slots"], key=lambda item: SLOT_ORDER[item['slot_type']]):
-                raw_file_name = sr["raw_image_path"]
-                if not raw_file_name:
-                    raise ValueError(f"设计 {design_code} 槽位 {sr['slot_type']} 缺少原图路径")
-
-                raw_file_path = safe_file_path(RAW_IMAGES_DIR, raw_file_name)
-                if not raw_file_path.exists():
-                    raise FileNotFoundError(f"原图文件未找到: {raw_file_name}")
-
-                try:
-                    with Image.open(raw_file_path) as img:
-                        # Always re-watermark the historical raw source.
-                        # Never export an existing preview or an unwatermarked fallback.
-                        watermarked_img = apply_watermark(img, watermark_cfg=wm_cfg)
-                        buf = io.BytesIO()
-                        # compress_level=1: trade a few KB for a much shorter export time
-                        watermarked_img.save(buf, format="PNG", compress_level=1)
-                        img_bytes = buf.getvalue()
-                except Exception as e:
-                    raise RuntimeError(f"水印施加失败，导出已硬阻断: {str(e)}")
-
+            for _, filename, img_bytes in render_product_images(wm_cfg, d):
                 code = format_product_code(d['product_number'])
-                arcname = f"{code}/{product_image_name(d['product_number'], d['archived_at'], sr['slot_type'])}"
+                arcname = f"{code}/{filename}"
                 zf.writestr(arcname, img_bytes)
 
             meta = {

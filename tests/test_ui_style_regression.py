@@ -20,7 +20,7 @@ JS_HOOK_CLASSES = {
     "tab-btn", "role-btn", "series-check", "series-primary", "slot-version-select",
     "btn-approve-pano", "btn-redo-pano", "btn-eliminate-pano",
     "btn-start-downstream", "btn-archive-quad", "btn-eliminate-quad",
-    "btn-slot-redo", "btn-export-single",
+    "btn-slot-redo", "btn-export-single", "btn-nas-upload",
     "unknown-task-row", "unknown-billing-ref", "unknown-attest",
     "btn-resolve-success", "btn-resolve-failure",
     "bulk-failure-list", "bulk-failure-item",
