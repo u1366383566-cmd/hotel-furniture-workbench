@@ -215,13 +215,19 @@ def process_one(factory=WebDav):
             remote.mkdir(code)
             with get_db(immediate=True) as conn:
                 conn.execute('UPDATE nas_upload_jobs SET owns_directory=1 WHERE id=?', (job['id'],))
+        # Transfer the entire group before starting slow remote readback, so one
+        # verification timeout cannot prevent the other images from arriving.
         for slot, filename, data in images:
             path = code + '/' + filename
             if not remote.exists(path):
                 with get_db(immediate=True) as conn:
                     conn.execute("UPDATE nas_upload_items SET status='uploading' WHERE job_id=? AND slot_type=?", (job['id'], slot))
                 remote.put_new(path, data)
-            _save_status(job['id'], 'verifying')
+            with get_db(immediate=True) as conn:
+                conn.execute("UPDATE nas_upload_items SET status=CASE WHEN status='verified' THEN status ELSE 'uploaded_unverified' END WHERE job_id=? AND slot_type=?", (job['id'], slot))
+        _save_status(job['id'], 'verifying')
+        for slot, filename, data in images:
+            path = code + '/' + filename
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE nas_upload_items SET status='verifying' WHERE job_id=? AND slot_type=?", (job['id'], slot))
             verify_item(remote, job['id'], slot, path, data)
@@ -229,6 +235,10 @@ def process_one(factory=WebDav):
                 conn.execute("UPDATE nas_upload_items SET status='verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
         if remote.names(code) != {item[1] for item in images}:
             raise NasConflict('正式目录内容与四图不一致，已停止')
+        # Recheck saved entity tags after all uploads: a verified early file may
+        # have changed while later files were being transferred or checked.
+        for slot, filename, data in images:
+            verify_item(remote, job['id'], slot, code + '/' + filename, data)
         _save_status(job['id'], 'success')
     except NasConflict as exc:
         _save_status(job['id'], 'conflict', str(exc))

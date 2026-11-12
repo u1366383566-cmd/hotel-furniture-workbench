@@ -73,6 +73,17 @@ def test_formal_conflict_never_overwritten(client, monkeypatch):
     assert remote.files=={'TFMK9999/other.png':b'other'}
 
 
+def test_all_four_are_sent_before_slow_verification(client, monkeypatch):
+    bid,did=seed(client,monkeypatch)
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    class SlowVerify(FakeRemote):
+        def verify(self,*args,**kwargs): raise TimeoutError('readback interrupted')
+    remote=SlowVerify()
+    assert service.process_one(lambda:remote)
+    assert remote.puts==4 and len(remote.names('TFMK9999'))==4
+    assert job(did)['status']=='waiting'
+
+
 def test_unknown_directory_ownership_is_not_assumed(client, monkeypatch):
     bid,did=seed(client,monkeypatch)
     client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
