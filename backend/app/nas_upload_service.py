@@ -110,7 +110,9 @@ class WebDav:
         if r.status_code not in (200, 201, 204):
             raise RuntimeError(f'图片上传结果待确认（HTTP {r.status_code}）')
 
-    def verify(self, path, expected_hash, expected_size):
+    def verify(self, path, expected_hash, expected_size, data=None, checkpoint=None, progress=None):
+        if data is not None and expected_size > 0:
+            return self._verify_ranges(path, data, checkpoint or (0, None), progress)
         h = hashlib.sha256()
         size = 0
         with self.client.stream('GET', self.url(path)) as r:
@@ -121,6 +123,49 @@ class WebDav:
                 h.update(chunk)
         if size != expected_size or h.hexdigest() != expected_hash:
             raise NasConflict('远端同名文件内容不一致，已停止以防覆盖')
+
+    def _verify_ranges(self, path, data, checkpoint, progress):
+        size = len(data)
+        offset, previous_tag = checkpoint
+        if offset < 0 or offset > size:
+            raise NasConflict('图片核验记录异常，需人工核对')
+        headers = {'Range': 'bytes=0-0', 'Accept-Encoding': 'identity'}
+        if previous_tag:
+            headers['If-Match'] = previous_tag
+        probe = self.client.get(self.url(path), headers=headers)
+        if probe.status_code == 412:
+            raise NasConflict('远端文件版本已变化，已停止以防误判')
+        tag = probe.headers.get('ETag')
+        if probe.status_code != 206 or probe.headers.get('Content-Range') != f'bytes 0-0/{size}' or probe.content != data[:1]:
+            raise RuntimeError('远端分段核验响应异常，等待重试')
+        if not tag or tag.startswith('W/'):
+            # Without a strong version marker, checkpoints cannot safely span requests.
+            return self.verify(path, hashlib.sha256(data).hexdigest(), size)
+        if previous_tag and tag != previous_tag:
+            raise NasConflict('远端文件版本已变化，已停止以防误判')
+        if progress and not previous_tag:
+            progress(offset, tag)
+        while offset < size:
+            end = min(offset + 65536, size) - 1
+            r = self.client.get(self.url(path), headers={'Range': f'bytes={offset}-{end}', 'If-Match': tag, 'Accept-Encoding': 'identity'})
+            if r.status_code == 412:
+                raise NasConflict('远端文件版本已变化，已停止以防误判')
+            if r.status_code != 206 or r.headers.get('Content-Range') != f'bytes {offset}-{end}/{size}' or r.headers.get('ETag') != tag:
+                raise RuntimeError('远端分段核验响应异常，等待重试')
+            if r.content != data[offset:end + 1]:
+                raise NasConflict('远端同名文件内容不一致，已停止以防覆盖')
+            offset = end + 1
+            if progress:
+                progress(offset, tag)
+
+
+def verify_item(remote, job_id, slot, path, data):
+    with get_db() as conn:
+        row = conn.execute('SELECT verify_offset,verify_etag FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job_id, slot)).fetchone()
+    def checkpoint(offset, etag):
+        with get_db(immediate=True) as conn:
+            conn.execute('UPDATE nas_upload_items SET verify_offset=?,verify_etag=? WHERE job_id=? AND slot_type=?', (offset,etag,job_id,slot))
+    remote.verify(path, hashlib.sha256(data).hexdigest(), len(data), data, (row['verify_offset'],row['verify_etag']), checkpoint)
 
 def _save_status(job_id, status, error=None, delay=None):
     with get_db(immediate=True) as conn:
@@ -179,7 +224,7 @@ def process_one(factory=WebDav):
             _save_status(job['id'], 'verifying')
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE nas_upload_items SET status='verifying' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-            remote.verify(path, hashlib.sha256(data).hexdigest(), len(data))
+            verify_item(remote, job['id'], slot, path, data)
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE nas_upload_items SET status='verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
         if remote.names(code) != {item[1] for item in images}:

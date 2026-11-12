@@ -37,10 +37,11 @@ class FakeRemote:
         if self.lose_response:
             self.lose_response = False
             raise TimeoutError('response lost')
-    def verify(self, path, expected_hash, expected_size):
-        data = self.files[path]
-        if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_hash:
+    def verify(self, path, expected_hash, expected_size, data=None, checkpoint=None, progress=None):
+        actual = self.files[path]
+        if len(actual) != expected_size or hashlib.sha256(actual).hexdigest() != expected_hash:
             raise service.NasConflict('different file')
+        if progress: progress(expected_size, '"test-etag"')
 
 
 def job(did):
@@ -161,6 +162,35 @@ def test_524_and_bad_readback_are_never_success():
         remote.put_new('temporary/1.png',b'data')
     with pytest.raises(service.NasConflict):
         remote.verify('temporary/1.png',hashlib.sha256(b'data').hexdigest(),4)
+    remote.close()
+
+
+def test_segmented_verification_resumes_and_rejects_changed_version():
+    import httpx
+    import pytest
+    data = b'a'*65536 + b'b'*65536 + b'c'*1000
+    checkpoints=[]; requests=[]; fail=[True]; changed=[False]
+    def transport(request):
+        start,end=map(int,request.headers['Range'][6:].split('-'))
+        requests.append((start,end))
+        if changed[0] and request.headers.get('If-Match'):
+            return httpx.Response(412,request=request)
+        if start==65536 and fail[0]:
+            fail[0]=False
+            raise httpx.ReadTimeout('interrupted',request=request)
+        return httpx.Response(206,headers={'Content-Range':f'bytes {start}-{end}/{len(data)}','ETag':'"v1"'},content=data[start:end+1],request=request)
+    remote=service.WebDav.__new__(service.WebDav)
+    remote.base='https://example.invalid/share'
+    remote.client=httpx.Client(transport=httpx.MockTransport(transport))
+    with pytest.raises(httpx.ReadTimeout):
+        remote.verify('TFMK001/1.png',hashlib.sha256(data).hexdigest(),len(data),data,(0,None),lambda o,e:checkpoints.append((o,e)))
+    assert checkpoints[-1]==(65536,'"v1"')
+    requests.clear()
+    remote.verify('TFMK001/1.png',hashlib.sha256(data).hexdigest(),len(data),data,checkpoints[-1],lambda o,e:checkpoints.append((o,e)))
+    assert requests[1][0]==65536 and checkpoints[-1][0]==len(data)
+    changed[0]=True
+    with pytest.raises(service.NasConflict):
+        remote.verify('TFMK001/1.png',hashlib.sha256(data).hexdigest(),len(data),data,checkpoints[-1],lambda o,e:None)
     remote.close()
 
 

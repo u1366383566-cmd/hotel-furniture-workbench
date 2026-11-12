@@ -83,6 +83,8 @@ def _ensure_columns(conn: sqlite3.Connection):
         PRIMARY KEY(job_id,slot_type))
     """)
     add_col_if_missing('nas_upload_jobs', 'owns_directory', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('nas_upload_items', 'verify_offset', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('nas_upload_items', 'verify_etag', 'TEXT')
     conn.execute("""CREATE TABLE IF NOT EXISTS nas_upload_attempts (
         job_id TEXT NOT NULL REFERENCES nas_upload_jobs(id) ON DELETE CASCADE,
         attempt INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
