@@ -89,7 +89,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
 
     spec = json.loads(d_row["structured_spec"]) if d_row["structured_spec"] else {}
     v_features = json.loads(d_row["visual_features"]) if d_row["visual_features"] else None
-    upload_row = conn.execute('SELECT id,status,error,attempts,updated_at FROM nas_upload_jobs WHERE design_id=?', (design_id,)).fetchone()
+    upload_row = conn.execute('SELECT id,status,error,attempts,updated_at,confirmed_by,confirmed_at FROM nas_upload_jobs WHERE design_id=?', (design_id,)).fetchone()
     upload = dict(upload_row) if upload_row else None
     if upload:
         upload['items'] = [dict(r) for r in conn.execute('SELECT slot_type,filename,status FROM nas_upload_items WHERE job_id=? ORDER BY filename', (upload['id'],))]

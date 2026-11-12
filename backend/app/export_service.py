@@ -29,9 +29,16 @@ def render_product_images(wm_cfg, design):
             raise FileNotFoundError(f'原图文件未找到: {raw_name}')
         try:
             with Image.open(raw_path) as img:
+                source_size = img.size
                 image = apply_watermark(img, watermark_cfg=wm_cfg)
+                if image.size != source_size:
+                    raise ValueError('水印处理改变了图片尺寸')
                 buf = io.BytesIO()
                 image.save(buf, format='PNG', compress_level=1)
+                with Image.open(io.BytesIO(buf.getvalue())) as checked:
+                    if checked.format != 'PNG' or checked.size != source_size:
+                        raise ValueError('导出图片格式或尺寸异常')
+                    checked.verify()
         except Exception as exc:
             raise RuntimeError(f'水印施加失败，导出已硬阻断: {exc}') from exc
         result.append((slot['slot_type'], product_image_name(design['product_number'], design['archived_at'], slot['slot_type']), buf.getvalue()))

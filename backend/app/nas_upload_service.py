@@ -24,6 +24,10 @@ class NasConflict(Exception):
     pass
 
 
+class NasPreflightError(Exception):
+    pass
+
+
 def enqueue_upload(conn, design_id, automatic=False):
     ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
     settings = conn.execute('SELECT auto_enabled FROM nas_upload_settings WHERE id=1').fetchone()
@@ -60,8 +64,11 @@ class WebDav:
             raise RuntimeError('NAS 连接配置不可读取')
         section = cfg['zhengzhou-nas']
         self.base = section['url'].rstrip('/')
-        if not self.base.startswith('https://'):
-            raise RuntimeError('NAS 必须使用 HTTPS 连接')
+        target = urlsplit(self.base)
+        if (target.scheme != 'https' or target.hostname != 'webdav.seezo.top' or
+            unquote(target.path).rstrip('/') != '/外贸部' or target.username or target.password or
+            target.query or target.fragment or target.port not in (None, 443)):
+            raise RuntimeError('NAS 连接地址与指定的郑州外贸部共享不一致')
         try:
             password = subprocess.run(['rclone', 'reveal', section['pass']], check=True, capture_output=True, text=True, timeout=10).stdout.rstrip('\n')
         except (OSError, subprocess.SubprocessError, KeyError):
@@ -106,76 +113,57 @@ class WebDav:
     def put_new(self, path, data):
         r = self.client.put(self.url(path), content=data, headers={'If-None-Match': '*', 'Content-Type': 'image/png'})
         if r.status_code in (409, 412):
-            return
+            raise NasConflict('远端同名文件已存在，已停止以防覆盖')
         if r.status_code not in (200, 201, 204):
             raise RuntimeError(f'图片上传结果待确认（HTTP {r.status_code}）')
-
-    def verify(self, path, expected_hash, expected_size, data=None, checkpoint=None, progress=None):
-        if data is not None and expected_size > 0:
-            return self._verify_ranges(path, data, checkpoint or (0, None), progress)
-        h = hashlib.sha256()
-        size = 0
-        with self.client.stream('GET', self.url(path)) as r:
-            if r.status_code != 200:
-                raise RuntimeError(f'远端图片核验失败（HTTP {r.status_code}）')
-            for chunk in r.iter_bytes():
-                size += len(chunk)
-                h.update(chunk)
-        if size != expected_size or h.hexdigest() != expected_hash:
-            raise NasConflict('远端同名文件内容不一致，已停止以防覆盖')
-
-    def _verify_ranges(self, path, data, checkpoint, progress):
-        size = len(data)
-        offset, previous_tag = checkpoint
-        if offset < 0 or offset > size:
-            raise NasConflict('图片核验记录异常，需人工核对')
-        headers = {'Range': 'bytes=0-0', 'Accept-Encoding': 'identity'}
-        if previous_tag:
-            headers['If-Match'] = previous_tag
-        probe = self.client.get(self.url(path), headers=headers)
-        if probe.status_code == 412:
-            raise NasConflict('远端文件版本已变化，已停止以防误判')
-        tag = probe.headers.get('ETag')
-        if probe.status_code != 206 or probe.headers.get('Content-Range') != f'bytes 0-0/{size}' or probe.content != data[:1]:
-            raise RuntimeError('远端分段核验响应异常，等待重试')
-        if not tag or tag.startswith('W/'):
-            # Without a strong version marker, checkpoints cannot safely span requests.
-            return self.verify(path, hashlib.sha256(data).hexdigest(), size)
-        if previous_tag and tag != previous_tag:
-            raise NasConflict('远端文件版本已变化，已停止以防误判')
-        if progress and not previous_tag:
-            progress(offset, tag)
-        while offset < size:
-            end = min(offset + 65536, size) - 1
-            r = self.client.get(self.url(path), headers={'Range': f'bytes={offset}-{end}', 'If-Match': tag, 'Accept-Encoding': 'identity'})
-            if r.status_code == 412:
-                raise NasConflict('远端文件版本已变化，已停止以防误判')
-            if r.status_code != 206 or r.headers.get('Content-Range') != f'bytes {offset}-{end}/{size}' or r.headers.get('ETag') != tag:
-                raise RuntimeError('远端分段核验响应异常，等待重试')
-            if r.content != data[offset:end + 1]:
-                raise NasConflict('远端同名文件内容不一致，已停止以防覆盖')
-            offset = end + 1
-            if progress:
-                progress(offset, tag)
-
-
-def verify_item(remote, job_id, slot, path, data):
-    with get_db() as conn:
-        row = conn.execute('SELECT verify_offset,verify_etag FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job_id, slot)).fetchone()
-    def checkpoint(offset, etag):
-        with get_db(immediate=True) as conn:
-            conn.execute('UPDATE nas_upload_items SET verify_offset=?,verify_etag=? WHERE job_id=? AND slot_type=?', (offset,etag,job_id,slot))
-    remote.verify(path, hashlib.sha256(data).hexdigest(), len(data), data, (row['verify_offset'],row['verify_etag']), checkpoint)
 
 def _save_status(job_id, status, error=None, delay=None):
     with get_db(immediate=True) as conn:
         conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime',?) END,updated_at=datetime('now','localtime') WHERE id=?", (status, error, delay, delay, job_id))
-        if status in ('success','waiting','failed','conflict'):
+        if status in ('awaiting_review','success','waiting','failed','conflict'):
             conn.execute("UPDATE nas_upload_attempts SET status=?,error=?,finished_at=datetime('now','localtime') WHERE job_id=? AND attempt=(SELECT attempts FROM nas_upload_jobs WHERE id=?)", (status,error,job_id,job_id))
-        if status == 'success':
-            enabled = conn.execute("UPDATE nas_upload_settings SET auto_enabled=1 WHERE id=1 AND auto_enabled=0 AND test_design_id=(SELECT design_id FROM nas_upload_jobs WHERE id=?)", (job_id,)).rowcount
-            if enabled:
-                conn.execute("UPDATE nas_upload_jobs SET status='queued',error=NULL,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE status='held'")
+
+
+def validate_upload_source(conn, design_id):
+    rows = conn.execute("""SELECT s.id AS slot_id,s.slot_type,s.status AS slot_status,
+        s.current_version_id,sv.id AS version_id,sv.slot_id AS version_slot_id,
+        sv.design_id AS version_design_id,sv.process_status,sv.is_locked,sv.is_unknown,
+        sv.is_invalidated,sv.depends_on_panorama_version_id
+        FROM slots s LEFT JOIN slot_versions sv ON sv.id=s.current_version_id
+        WHERE s.design_id=?""", (design_id,)).fetchall()
+    by_type = {r['slot_type']: r for r in rows}
+    required = {'panorama','white_isolated','twin_bed','nightstand_closeup'}
+    if len(rows) != 4 or set(by_type) != required:
+        raise ValueError('上传前检查失败：四图槽位不完整')
+    for row in rows:
+        if (row['slot_status'] != 'approved' or not row['version_id'] or
+            row['version_slot_id'] != row['slot_id'] or row['version_design_id'] != design_id or
+            row['process_status'] != 'completed' or not row['is_locked'] or
+            row['is_unknown'] or row['is_invalidated']):
+            raise ValueError('上传前检查失败：图片版本未锁定、损坏或状态不正确')
+    panorama = by_type['panorama']['version_id']
+    if any(by_type[t]['depends_on_panorama_version_id'] != panorama for t in required - {'panorama'}):
+        raise ValueError('上传前检查失败：配图与归档全景版本不一致')
+    return {t: by_type[t]['version_id'] for t in required}
+
+
+def confirm_manual(conn, design_id, user_id, role):
+    job = conn.execute("SELECT j.id,j.status,d.status AS design_status,d.product_number FROM nas_upload_jobs j JOIN designs d ON d.id=j.design_id WHERE j.design_id=?", (design_id,)).fetchone()
+    if not job or job['design_status'] != 'archived' or job['product_number'] is None:
+        raise ValueError('该产品不存在或未归档编号')
+    if job['status'] == 'success':
+        return False
+    if job['status'] != 'awaiting_review':
+        raise ValueError('该组尚未上传完成，不能进行人工确认')
+    rows = conn.execute('SELECT slot_type,status FROM nas_upload_items WHERE job_id=?', (job['id'],)).fetchall()
+    if len(rows) != 4 or {r['slot_type'] for r in rows} != {'panorama','white_isolated','twin_bed','nightstand_closeup'} or any(r['status'] != 'uploaded_unverified' for r in rows):
+        raise ValueError('该组四图上传记录不完整，不能确认')
+    conn.execute("UPDATE nas_upload_jobs SET status='success',confirmed_by=?,confirmed_at=datetime('now','localtime'),error=NULL,updated_at=datetime('now','localtime') WHERE id=?", (user_id,job['id']))
+    conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) SELECT ?,batch_id,'nas_manual_confirm',?,?,? FROM designs WHERE id=?", ('aud_'+uuid.uuid4().hex,user_id,role,'用户确认已在 NAS 检查四张图片及文件名',design_id))
+    enabled = conn.execute('UPDATE nas_upload_settings SET auto_enabled=1 WHERE id=1 AND auto_enabled=0 AND test_design_id=?', (design_id,)).rowcount
+    if enabled:
+        conn.execute("UPDATE nas_upload_jobs SET status='queued',error=NULL,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE status='held'")
+    return True
 
 
 def process_one(factory=WebDav):
@@ -188,20 +176,29 @@ def process_one(factory=WebDav):
         conn.execute('INSERT INTO nas_upload_attempts(job_id,attempt) VALUES (?,?)', (job['id'],job['attempts']+1))
     remote = None
     try:
-        with get_db() as conn:
-            d = conn.execute('SELECT batch_id FROM designs WHERE id=?', (job['design_id'],)).fetchone()
-            if not d:
-                return True
-            wm, designs = _collect_export_data(conn, d['batch_id'], [job['design_id']])
-        design = designs[0]
-        images = render_product_images(wm, design)
+        try:
+            with get_db() as conn:
+                d = conn.execute('SELECT batch_id FROM designs WHERE id=?', (job['design_id'],)).fetchone()
+                if not d:
+                    return True
+                wm, designs = _collect_export_data(conn, d['batch_id'], [job['design_id']])
+                versions = validate_upload_source(conn, job['design_id'])
+            design = designs[0]
+            images = render_product_images(wm, design)
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            raise NasPreflightError(str(exc)) from None
+        if len(images) != 4 or len({slot for slot, _, _ in images}) != 4 or len({name for _, name, _ in images}) != 4:
+            raise NasPreflightError('上传前检查失败：四图文件名或图片数量异常')
         with get_db(immediate=True) as conn:
             for slot, filename, data in images:
                 digest = hashlib.sha256(data).hexdigest()
-                old = conn.execute('SELECT filename,sha256,byte_count FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job['id'], slot)).fetchone()
+                old = conn.execute('SELECT filename,sha256,byte_count,slot_version_id FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job['id'], slot)).fetchone()
                 if old and (old['filename'], old['sha256'], old['byte_count']) != (filename, digest, len(data)):
                     raise NasConflict('本地归档图片或水印已变化，需人工核对')
-                conn.execute('INSERT OR IGNORE INTO nas_upload_items(job_id,slot_type,filename,sha256,byte_count) VALUES (?,?,?,?,?)', (job['id'], slot, filename, digest, len(data)))
+                if old and old['slot_version_id'] and old['slot_version_id'] != versions[slot]:
+                    raise NasConflict('归档图片版本已变化，需人工核对')
+                conn.execute('INSERT OR IGNORE INTO nas_upload_items(job_id,slot_type,filename,sha256,byte_count,slot_version_id) VALUES (?,?,?,?,?,?)', (job['id'], slot, filename, digest, len(data), versions[slot]))
+                conn.execute('UPDATE nas_upload_items SET slot_version_id=? WHERE job_id=? AND slot_type=? AND slot_version_id IS NULL', (versions[slot],job['id'],slot))
         remote = factory()
         code = format_product_code(design['product_number'])
         if remote.exists(code):
@@ -209,7 +206,7 @@ def process_one(factory=WebDav):
             expected = {item[1] for item in images}
             if not found.issubset(expected):
                 raise NasConflict('正式目录包含其他文件，已停止以防覆盖')
-            if not job['owns_directory'] and found != expected:
+            if not job['owns_directory']:
                 raise NasConflict('已有目录归属无法确认，已停止以防覆盖')
         else:
             remote.mkdir(code)
@@ -219,34 +216,27 @@ def process_one(factory=WebDav):
         # verification timeout cannot prevent the other images from arriving.
         for slot, filename, data in images:
             path = code + '/' + filename
-            if not remote.exists(path):
+            exists = remote.exists(path)
+            with get_db() as conn:
+                item_status = conn.execute('SELECT status FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job['id'],slot)).fetchone()['status']
+            if exists and item_status == 'pending':
+                raise NasConflict('远端出现未经本任务上传的同名图片，已停止以防覆盖')
+            if not exists:
                 with get_db(immediate=True) as conn:
                     conn.execute("UPDATE nas_upload_items SET status='uploading' WHERE job_id=? AND slot_type=?", (job['id'], slot))
                 remote.put_new(path, data)
             with get_db(immediate=True) as conn:
-                conn.execute("UPDATE nas_upload_items SET status=CASE WHEN status='verified' THEN status ELSE 'uploaded_unverified' END WHERE job_id=? AND slot_type=?", (job['id'], slot))
-        _save_status(job['id'], 'verifying')
-        for slot, filename, data in images:
-            path = code + '/' + filename
-            with get_db(immediate=True) as conn:
-                conn.execute("UPDATE nas_upload_items SET status='verifying' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-            verify_item(remote, job['id'], slot, path, data)
-            with get_db(immediate=True) as conn:
-                conn.execute("UPDATE nas_upload_items SET status='verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-        if remote.names(code) != {item[1] for item in images}:
-            raise NasConflict('正式目录内容与四图不一致，已停止')
-        # Recheck saved entity tags after all uploads: a verified early file may
-        # have changed while later files were being transferred or checked.
-        for slot, filename, data in images:
-            verify_item(remote, job['id'], slot, code + '/' + filename, data)
-        _save_status(job['id'], 'success')
+                conn.execute("UPDATE nas_upload_items SET status='uploaded_unverified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
+        _save_status(job['id'], 'awaiting_review')
+    except NasPreflightError as exc:
+        _save_status(job['id'], 'failed', str(exc)[:200])
     except NasConflict as exc:
         _save_status(job['id'], 'conflict', str(exc))
     except Exception as exc:
         # Avoid leaking remote URLs, credentials, paths, or raw server responses.
-        msg = str(exc) if isinstance(exc, (RuntimeError, ValueError, FileNotFoundError)) else 'NAS 连接中断或超时，等待核验后重试'
+        msg = str(exc) if isinstance(exc, (RuntimeError, ValueError, FileNotFoundError)) else 'NAS 连接中断或超时，稍后检查目标并重试'
         if 'http' in msg.lower() and not msg.startswith(('查询远端','图片上传','远端图片','创建产品')):
-            msg = 'NAS 连接中断或超时，等待核验后重试'
+            msg = 'NAS 连接中断或超时，稍后检查目标并重试'
         attempts = job['attempts'] + 1
         _save_status(job['id'], 'waiting' if attempts < 10 else 'failed', msg[:200], '+5 minutes' if attempts < 10 else None)
     finally:
@@ -288,8 +278,8 @@ class NasWorker:
     @staticmethod
     def recover_interrupted():
         with get_db(immediate=True) as conn:
-            conn.execute("UPDATE nas_upload_attempts SET status='waiting',error='任务中断，等待核验远端',finished_at=datetime('now','localtime') WHERE finished_at IS NULL AND job_id IN (SELECT id FROM nas_upload_jobs WHERE status IN ('uploading','verifying'))")
-            conn.execute("UPDATE nas_upload_jobs SET status='waiting',error='任务中断，等待核验远端',next_attempt_at=NULL WHERE status IN ('uploading','verifying')")
+            conn.execute("UPDATE nas_upload_attempts SET status='waiting',error='任务中断，稍后检查目标并重试',finished_at=datetime('now','localtime') WHERE finished_at IS NULL AND job_id IN (SELECT id FROM nas_upload_jobs WHERE status IN ('uploading','verifying'))")
+            conn.execute("UPDATE nas_upload_jobs SET status='waiting',error='任务中断，稍后检查目标并重试',next_attempt_at=NULL WHERE status IN ('uploading','verifying')")
 
     async def _loop(self):
         while self.running:
