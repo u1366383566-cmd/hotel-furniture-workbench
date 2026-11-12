@@ -26,7 +26,7 @@ class NasConflict(Exception):
 
 def enqueue_upload(conn, design_id):
     ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
-    error = None if ready else 'NAS 安全发布尚未验证，任务尚未开始'
+    error = None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
     conn.execute("INSERT OR IGNORE INTO nas_upload_jobs(id,design_id,status,error) VALUES (?,?,?,?)", (uuid.uuid4().hex, design_id, 'queued' if ready else 'waiting', error))
 
 
@@ -41,7 +41,7 @@ def queue_selected(conn, batch_id, ids):
             continue
         enqueue_upload(conn, did)
         ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
-        message = None if ready else 'NAS 安全发布尚未验证，任务尚未开始'
+        message = None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
         conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE design_id=? AND status IN ('failed','conflict','waiting')", ('queued' if ready else 'waiting',message,did,))
         results.append({'design_id': did, 'ok': True})
     return results
@@ -51,7 +51,7 @@ class WebDav:
     def __init__(self):
         path = os.environ.get('WORKBENCH_NAS_RCLONE_CONFIG', '')
         if not path or os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') != '1':
-            raise RuntimeError('NAS 连接或安全发布尚未配置完成')
+            raise RuntimeError('NAS 连接或上传安全检查尚未配置完成')
         cfg = configparser.ConfigParser(interpolation=None)
         if not cfg.read(path, encoding='utf-8') or 'zhengzhou-nas' not in cfg:
             raise RuntimeError('NAS 连接配置不可读取')
@@ -81,8 +81,10 @@ class WebDav:
 
     def mkdir(self, path):
         r = self.client.request('MKCOL', self.url(path))
-        if r.status_code not in (201, 405):
-            raise RuntimeError(f'创建临时目录失败（HTTP {r.status_code}）')
+        if r.status_code in (405, 409):
+            raise NasConflict('产品目录已存在或发生冲突，未覆盖')
+        if r.status_code != 201:
+            raise RuntimeError(f'创建产品目录结果待确认（HTTP {r.status_code}）')
 
     def names(self, path):
         r = self.client.request('PROPFIND', self.url(path), headers={'Depth': '1'})
@@ -117,14 +119,6 @@ class WebDav:
         if size != expected_size or h.hexdigest() != expected_hash:
             raise NasConflict('远端同名文件内容不一致，已停止以防覆盖')
 
-    def publish(self, source, target):
-        r = self.client.request('MOVE', self.url(source), headers={'Destination': self.url(target), 'Overwrite': 'F'})
-        if r.status_code in (409, 412):
-            raise NasConflict('正式目录已存在或发生冲突，未覆盖')
-        if r.status_code not in (201, 204):
-            raise RuntimeError(f'发布结果待确认（HTTP {r.status_code}）')
-
-
 def _save_status(job_id, status, error=None, delay=None):
     with get_db(immediate=True) as conn:
         conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime',?) END,updated_at=datetime('now','localtime') WHERE id=?", (status, error, delay, delay, job_id))
@@ -158,21 +152,19 @@ def process_one(factory=WebDav):
                 conn.execute('INSERT OR IGNORE INTO nas_upload_items(job_id,slot_type,filename,sha256,byte_count) VALUES (?,?,?,?,?)', (job['id'], slot, filename, digest, len(data)))
         remote = factory()
         code = format_product_code(design['product_number'])
-        stage = '.workbench-' + job['id']
         if remote.exists(code):
-            # Existing formal directory can only be accepted after all four bytes match.
-            if remote.names(code) != {item[1] for item in images}:
-                raise NasConflict('正式目录内容与四图不一致，已停止以防覆盖')
-            for slot, filename, data in images:
-                remote.verify(code + '/' + filename, hashlib.sha256(data).hexdigest(), len(data))
-                with get_db(immediate=True) as conn:
-                    conn.execute("UPDATE nas_upload_items SET status='verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-            _save_status(job['id'], 'success')
-            return True
-        if not remote.exists(stage):
-            remote.mkdir(stage)
+            found = remote.names(code)
+            expected = {item[1] for item in images}
+            if not found.issubset(expected):
+                raise NasConflict('正式目录包含其他文件，已停止以防覆盖')
+            if not job['owns_directory'] and found != expected:
+                raise NasConflict('已有目录归属无法确认，已停止以防覆盖')
+        else:
+            remote.mkdir(code)
+            with get_db(immediate=True) as conn:
+                conn.execute('UPDATE nas_upload_jobs SET owns_directory=1 WHERE id=?', (job['id'],))
         for slot, filename, data in images:
-            path = stage + '/' + filename
+            path = code + '/' + filename
             if not remote.exists(path):
                 with get_db(immediate=True) as conn:
                     conn.execute("UPDATE nas_upload_items SET status='uploading' WHERE job_id=? AND slot_type=?", (job['id'], slot))
@@ -182,22 +174,16 @@ def process_one(factory=WebDav):
                 conn.execute("UPDATE nas_upload_items SET status='verifying' WHERE job_id=? AND slot_type=?", (job['id'], slot))
             remote.verify(path, hashlib.sha256(data).hexdigest(), len(data))
             with get_db(immediate=True) as conn:
-                conn.execute("UPDATE nas_upload_items SET status='staged_verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-        if remote.names(stage) != {item[1] for item in images}:
-            raise NasConflict('临时目录内容异常，已停止发布')
-        remote.publish(stage, code)
-        # Re-read published files, never trust MOVE/PUT alone.
-        for slot, filename, data in images:
-            remote.verify(code + '/' + filename, hashlib.sha256(data).hexdigest(), len(data))
-            with get_db(immediate=True) as conn:
                 conn.execute("UPDATE nas_upload_items SET status='verified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
+        if remote.names(code) != {item[1] for item in images}:
+            raise NasConflict('正式目录内容与四图不一致，已停止')
         _save_status(job['id'], 'success')
     except NasConflict as exc:
         _save_status(job['id'], 'conflict', str(exc))
     except Exception as exc:
         # Avoid leaking remote URLs, credentials, paths, or raw server responses.
         msg = str(exc) if isinstance(exc, (RuntimeError, ValueError, FileNotFoundError)) else 'NAS 连接中断或超时，等待核验后重试'
-        if 'http' in msg.lower() and not msg.startswith(('查询远端','图片上传','远端图片','创建临时','发布结果')):
+        if 'http' in msg.lower() and not msg.startswith(('查询远端','图片上传','远端图片','创建产品')):
             msg = 'NAS 连接中断或超时，等待核验后重试'
         attempts = job['attempts'] + 1
         _save_status(job['id'], 'waiting' if attempts < 10 else 'failed', msg[:200], '+5 minutes' if attempts < 10 else None)

@@ -19,11 +19,17 @@ class FakeRemote:
         self.files = {}
         self.dirs = set()
         self.lose_response = False
+        self.lose_mkdir_response = False
         self.puts = 0
     def close(self): pass
     def exists(self, path): return path in self.dirs or path in self.files
     def names(self, path): return {p[len(path)+1:] for p in self.files if p.startswith(path+'/')}
-    def mkdir(self, path): self.dirs.add(path)
+    def mkdir(self, path):
+        if path in self.dirs: raise service.NasConflict('exists')
+        self.dirs.add(path)
+        if self.lose_mkdir_response:
+            self.lose_mkdir_response=False
+            raise TimeoutError('mkdir response lost')
     def put_new(self, path, data):
         assert path not in self.files
         self.puts += 1
@@ -35,10 +41,6 @@ class FakeRemote:
         data = self.files[path]
         if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_hash:
             raise service.NasConflict('different file')
-    def publish(self, source, target):
-        assert target not in self.dirs
-        self.dirs.remove(source);self.dirs.add(target)
-        self.files = {(target+p[len(source):] if p.startswith(source+'/') else p):v for p,v in self.files.items()}
 
 
 def job(did):
@@ -70,6 +72,26 @@ def test_formal_conflict_never_overwritten(client, monkeypatch):
     assert remote.files=={'TFMK9999/other.png':b'other'}
 
 
+def test_unknown_directory_ownership_is_not_assumed(client, monkeypatch):
+    bid,did=seed(client,monkeypatch)
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    remote=FakeRemote();remote.lose_mkdir_response=True
+    assert service.process_one(lambda:remote)
+    assert job(did)['status']=='waiting' and remote.puts==0
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    assert service.process_one(lambda:remote)
+    assert job(did)['status']=='conflict' and remote.puts==0
+
+
+def test_matching_existing_four_images_are_accepted_without_overwrite(client, monkeypatch):
+    bid,did=seed(client,monkeypatch)
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    remote=FakeRemote();remote.dirs.add('TFMK9999')
+    remote.files={f'TFMK9999/{i}.png':bytes([i]) for i in range(1,5)}
+    assert service.process_one(lambda:remote)
+    assert job(did)['status']=='success' and remote.puts==0
+
+
 def test_unassigned_group_rejected_and_bad_config_stays_unpublished(client, monkeypatch):
     bid,did=seed(client,monkeypatch)
     with get_db(immediate=True) as c:c.execute('UPDATE designs SET product_number=NULL WHERE id=?',(did,))
@@ -92,7 +114,7 @@ def test_partial_batch_queue_and_duplicate_click(client, monkeypatch):
     assert client.post('/api/nas-upload/enqueue',json=payload,headers={'X-User-Role':'invalid'}).status_code==403
 
 
-def test_webdav_publish_refuses_collision():
+def test_webdav_upload_refuses_overwrite():
     import httpx
     seen=[]
     def transport(request):
@@ -102,9 +124,9 @@ def test_webdav_publish_refuses_collision():
     remote.base='https://example.invalid/share'
     remote.client=httpx.Client(transport=httpx.MockTransport(transport))
     import pytest
-    with pytest.raises(service.NasConflict):remote.publish('.workbench-one','TFMK001')
-    assert seen[0].headers['Overwrite']=='F'
-    assert seen[0].headers['Destination'].endswith('/TFMK001')
+    remote.put_new('TFMK001/1.png',b'data')
+    assert seen[0].headers['If-None-Match']=='*'
+    assert seen[0].url.path.endswith('/TFMK001/1.png')
     remote.close()
 
 
