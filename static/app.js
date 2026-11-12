@@ -1855,7 +1855,7 @@ async function renderArchivedTab() {
     card.className = 'wb-card p-4 space-y-3';
     const slots = d.slots;
     const alreadyExported = exportedDesignIds.has(d.id);
-    const nasStatus = {queued:'待上传',uploading:'上传中',verifying:'核验中',waiting:'等待核验',success:'上传成功',failed:'上传失败',conflict:'上传冲突'};
+    const nasStatus = {held:'等待开启自动上传',queued:'待上传',uploading:'上传中',verifying:'核验中',waiting:'等待核验',success:'上传成功',failed:'上传失败',conflict:'上传冲突'};
     const nas = d.nas_upload;
 
     card.innerHTML = `

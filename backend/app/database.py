@@ -88,6 +88,8 @@ def _ensure_columns(conn: sqlite3.Connection):
         attempt INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         finished_at TEXT, status TEXT, error TEXT, PRIMARY KEY(job_id,attempt))
     """)
+    conn.execute("CREATE TABLE IF NOT EXISTS nas_upload_settings (id INTEGER PRIMARY KEY CHECK(id=1), auto_enabled INTEGER NOT NULL DEFAULT 0, test_design_id TEXT)")
+    conn.execute("INSERT OR IGNORE INTO nas_upload_settings(id,auto_enabled) VALUES (1,0)")
     add_col_if_missing('slot_versions', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('slot_versions', 'prompt_metadata', 'TEXT')
     add_col_if_missing('slot_versions', 'mock_visual_features', 'TEXT')

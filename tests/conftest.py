@@ -36,6 +36,7 @@ def client():
         # claimed by the next test and turning timing into false failures.
         with get_db(immediate=True) as conn:
             conn.execute("DELETE FROM batches")
+            conn.execute("UPDATE nas_upload_settings SET auto_enabled=0,test_design_id=NULL WHERE id=1")
             conn.execute("DELETE FROM text_api_configs")
             # 生图上游配置重置为默认禁用，防止上一个用例的真实模式泄漏到后续用例
             conn.execute("""

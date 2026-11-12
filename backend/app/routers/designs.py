@@ -713,7 +713,7 @@ def review_quad(
             SET status = 'archived', product_number = ?, archived_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime')
             WHERE id = ?
         """, (number, design_id))
-        enqueue_upload(conn, design_id)
+        enqueue_upload(conn, design_id, automatic=True)
         conn.execute("UPDATE batches SET current_archived_count = current_archived_count + 1 WHERE id = ?", (batch_id,))
 
         b_curr = cur.execute(

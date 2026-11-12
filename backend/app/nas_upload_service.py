@@ -24,10 +24,13 @@ class NasConflict(Exception):
     pass
 
 
-def enqueue_upload(conn, design_id):
+def enqueue_upload(conn, design_id, automatic=False):
     ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
-    error = None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
-    conn.execute("INSERT OR IGNORE INTO nas_upload_jobs(id,design_id,status,error) VALUES (?,?,?,?)", (uuid.uuid4().hex, design_id, 'queued' if ready else 'waiting', error))
+    settings = conn.execute('SELECT auto_enabled FROM nas_upload_settings WHERE id=1').fetchone()
+    held = automatic and (not settings or not settings['auto_enabled'])
+    error = '等待测试通过后开启自动上传' if held else None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
+    status = 'held' if held else 'queued' if ready else 'waiting'
+    conn.execute("INSERT OR IGNORE INTO nas_upload_jobs(id,design_id,status,error) VALUES (?,?,?,?)", (uuid.uuid4().hex, design_id, status, error))
 
 
 def queue_selected(conn, batch_id, ids):
@@ -42,7 +45,7 @@ def queue_selected(conn, batch_id, ids):
         enqueue_upload(conn, did)
         ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
         message = None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
-        conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE design_id=? AND status IN ('failed','conflict','waiting')", ('queued' if ready else 'waiting',message,did,))
+        conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE design_id=? AND status IN ('failed','conflict','waiting','held')", ('queued' if ready else 'waiting',message,did,))
         results.append({'design_id': did, 'ok': True})
     return results
 
@@ -124,6 +127,10 @@ def _save_status(job_id, status, error=None, delay=None):
         conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now','localtime',?) END,updated_at=datetime('now','localtime') WHERE id=?", (status, error, delay, delay, job_id))
         if status in ('success','waiting','failed','conflict'):
             conn.execute("UPDATE nas_upload_attempts SET status=?,error=?,finished_at=datetime('now','localtime') WHERE job_id=? AND attempt=(SELECT attempts FROM nas_upload_jobs WHERE id=?)", (status,error,job_id,job_id))
+        if status == 'success':
+            enabled = conn.execute("UPDATE nas_upload_settings SET auto_enabled=1 WHERE id=1 AND auto_enabled=0 AND test_design_id=(SELECT design_id FROM nas_upload_jobs WHERE id=?)", (job_id,)).rowcount
+            if enabled:
+                conn.execute("UPDATE nas_upload_jobs SET status='queued',error=NULL,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE status='held'")
 
 
 def process_one(factory=WebDav):

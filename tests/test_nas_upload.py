@@ -92,6 +92,25 @@ def test_matching_existing_four_images_are_accepted_without_overwrite(client, mo
     assert job(did)['status']=='success' and remote.puts==0
 
 
+def test_only_verified_test_success_enables_and_releases_new_archives(client, monkeypatch):
+    bid,did=seed(client,monkeypatch)
+    other='held-design'
+    with get_db(immediate=True) as c:
+        c.execute("INSERT INTO designs(id,batch_id,series_id,design_code,status,structured_spec,product_number,archived_at) VALUES (?,?, 'modern_business','HELD','archived','{}',9998,'2026-11-12 10:01:00')",(other,bid))
+        c.execute('UPDATE nas_upload_settings SET auto_enabled=0,test_design_id=? WHERE id=1',(did,))
+        service.enqueue_upload(c,other,automatic=True)
+        service.enqueue_upload(c,did)
+    assert job(other)['status']=='held'
+    remote=FakeRemote();remote.lose_response=True
+    service.process_one(lambda:remote)
+    assert job(did)['status']=='waiting' and job(other)['status']=='held'
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    service.process_one(lambda:remote)
+    assert job(did)['status']=='success' and job(other)['status']=='queued'
+    with get_db() as c:
+        assert c.execute('SELECT auto_enabled FROM nas_upload_settings WHERE id=1').fetchone()[0]==1
+
+
 def test_unassigned_group_rejected_and_bad_config_stays_unpublished(client, monkeypatch):
     bid,did=seed(client,monkeypatch)
     with get_db(immediate=True) as c:c.execute('UPDATE designs SET product_number=NULL WHERE id=?',(did,))
