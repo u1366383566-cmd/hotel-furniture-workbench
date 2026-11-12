@@ -402,7 +402,7 @@ def run_acceptance(base, storage, server):
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     names = zf.namelist()
     check("ZIP 含 3 设计 x (4图+元数据)", len([n for n in names if n.endswith(".png")]) == 12 and
-          len([n for n in names if n.endswith("METADATA.json")]) == 3, names[:5])
+          len([n for n in names if n.startswith("METADATA-TFMK") and n.endswith(".json")]) == 3, names[:5])
     check("ZIP 无路径穿越条目", all(not n.startswith("/") and ".." not in n and ":" not in n for n in names))
     # 水印生效: 导出图必须与无水印原图像素不同
     _, designs = http("GET", f"{base}/api/designs/batch/{batch_id}", headers=role_headers("admin"))
@@ -411,7 +411,9 @@ def run_acceptance(base, storage, server):
     st_raw, raw_bytes = http("GET", f"{base}/api/media/raw/{raw_vid}", headers=role_headers("admin"), raw=True)
     check("管理员可访问无水印原图", st_raw == 200, st_raw)
     raw_img = Image.open(io.BytesIO(raw_bytes))
-    exported_name = f"{a_admin['design_code']}/{a_admin['design_code']}_panorama_v{a_admin['slots']['panorama']['current_version']['version_num']}_watermarked.png"
+    from backend.app.product_numbering import product_image_name
+    code = a_admin['product_code']
+    exported_name = f"{code}/{product_image_name(int(code[4:]), a_admin['archived_at'], 'panorama')}"
     exported_img = Image.open(io.BytesIO(zf.read(exported_name)))
     check("导出图与原图像素不同(最终水印已压制)", list(raw_img.getdata()) != list(exported_img.getdata()))
     st, _ = http("POST", f"{base}/api/export/batch/{batch_id}", headers=H("operator"))

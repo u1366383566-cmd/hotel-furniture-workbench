@@ -14,6 +14,7 @@ from .watermark_service import (
     watermark_config,
 )
 from .security import safe_file_path
+from .product_numbering import format_product_code, product_image_name, SLOT_ORDER
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ def _collect_export_data(conn: sqlite3.Connection, batch_id: str, design_ids: Li
     designs_data = []
     for did in design_ids:
         cur.execute("""
-            SELECT id, design_code, series_id, status, structured_spec, visual_features, archived_at
+            SELECT id, design_code, series_id, status, structured_spec, visual_features, archived_at, product_number
             FROM designs WHERE id = ? AND batch_id = ?
         """, (did, batch_id))
         d_row = cur.fetchone()
@@ -47,6 +48,8 @@ def _collect_export_data(conn: sqlite3.Connection, batch_id: str, design_ids: Li
             raise ValueError(f"设计 {did} 不存在")
         if d_row["status"] != "archived":
             raise ValueError(f"设计 {d_row['design_code']} 尚未完成终审归档，禁止导出！")
+        if d_row['product_number'] is None:
+            raise ValueError(f"设计 {d_row['design_code']} 已归档但尚未分配正式产品编号，无法按规范导出")
 
         design_code = d_row["design_code"]
         cur.execute("""
@@ -59,14 +62,15 @@ def _collect_export_data(conn: sqlite3.Connection, batch_id: str, design_ids: Li
 
         found_types = {r["slot_type"] for r in slot_rows}
         required_types = {"panorama", "white_isolated", "twin_bed", "nightstand_closeup"}
-        if not required_types.issubset(found_types):
+        if found_types != required_types:
             raise ValueError(
-                f"设计 {design_code} 槽位不完整，缺少: {required_types - found_types}，拒绝导出"
+                f"设计 {design_code} 的四图槽位异常，缺少: {required_types - found_types}，额外: {found_types - required_types}，拒绝导出"
             )
 
         designs_data.append({
             "id": d_row["id"],
             "design_code": design_code,
+            "product_number": d_row['product_number'],
             "series_id": d_row["series_id"],
             "structured_spec": json.loads(d_row["structured_spec"]) if d_row["structured_spec"] else {},
             "visual_features": json.loads(d_row["visual_features"]) if d_row["visual_features"] else {},
@@ -102,7 +106,7 @@ def _assemble_watermarked_zip(wm_cfg, designs_data: list, batch_id: str) -> tupl
     try:
         for d in designs_data:
             design_code = d["design_code"]
-            for sr in d["slots"]:
+            for sr in sorted(d["slots"], key=lambda item: SLOT_ORDER[item['slot_type']]):
                 raw_file_name = sr["raw_image_path"]
                 if not raw_file_name:
                     raise ValueError(f"设计 {design_code} 槽位 {sr['slot_type']} 缺少原图路径")
@@ -123,15 +127,14 @@ def _assemble_watermarked_zip(wm_cfg, designs_data: list, batch_id: str) -> tupl
                 except Exception as e:
                     raise RuntimeError(f"水印施加失败，导出已硬阻断: {str(e)}")
 
-                arcname = (
-                    f"{design_code}/{design_code}_{sr['slot_type']}"
-                    f"_v{sr['version_num']}_watermarked.png"
-                )
+                code = format_product_code(d['product_number'])
+                arcname = f"{code}/{product_image_name(d['product_number'], d['archived_at'], sr['slot_type'])}"
                 zf.writestr(arcname, img_bytes)
 
             meta = {
                 "design_id": d["id"],
                 "design_code": design_code,
+                "product_code": format_product_code(d['product_number']),
                 "series_id": d["series_id"],
                 "structured_spec": d["structured_spec"],
                 "visual_features": d["visual_features"],
@@ -147,7 +150,7 @@ def _assemble_watermarked_zip(wm_cfg, designs_data: list, batch_id: str) -> tupl
                 ],
             }
             zf.writestr(
-                f"{design_code}/METADATA.json",
+                f"METADATA-{format_product_code(d['product_number'])}.json",
                 json.dumps(meta, ensure_ascii=False, indent=2),
             )
 

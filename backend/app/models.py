@@ -107,6 +107,7 @@ class DesignDetail(BaseModel):
     series_id: str
     series_name: str
     design_code: str
+    product_code: Optional[str] = None
     is_standby: bool
     status: str
     planning_status: str = 'legacy'

@@ -154,14 +154,15 @@ def list_export_records(
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, design_id, export_type, file_name, file_size,
-                   exported_by, exported_role, created_at
-            FROM export_records WHERE batch_id = ?
-            ORDER BY created_at DESC, id DESC
+            SELECT e.id, e.design_id, e.export_type, e.file_name, e.file_size,
+                   e.exported_by, e.exported_role, e.created_at, d.product_number
+            FROM export_records e LEFT JOIN designs d ON d.id=e.design_id WHERE e.batch_id = ?
+            ORDER BY e.created_at DESC, e.id DESC
             """,
             (batch_id,),
         )
-        return [dict(r) for r in cur.fetchall()]
+        from ..product_numbering import format_product_code
+        return [{**dict(r), 'product_code': format_product_code(r['product_number']) if r['product_number'] is not None else None} for r in cur.fetchall()]
 
 
 @router.get("/download/{file_name}", dependencies=[Depends(require_roles(["operator", "leader", "admin"]))])

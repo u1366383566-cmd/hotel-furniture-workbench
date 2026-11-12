@@ -165,16 +165,17 @@ def test_watermarked_zip_export_integrity(client, monkeypatch):
     zip_bytes = io.BytesIO(dl_res.content)
     with zipfile.ZipFile(zip_bytes, mode="r") as zf:
         file_list = zf.namelist()
-        code = d["design_code"]
+        archived = client.get(f"/api/designs/{d['id']}").json()
+        code = archived['product_code']
+        from backend.app.product_numbering import product_image_name
+        number = int(code[4:])
         # 必须包含 4 张规范命名的槽位图及元数据
-        assert f"{code}/{code}_panorama_v1_watermarked.png" in file_list
-        assert f"{code}/{code}_white_isolated_v1_watermarked.png" in file_list
-        assert f"{code}/{code}_twin_bed_v1_watermarked.png" in file_list
-        assert f"{code}/{code}_nightstand_closeup_v1_watermarked.png" in file_list
-        assert f"{code}/METADATA.json" in file_list
+        for slot in ('panorama', 'white_isolated', 'twin_bed', 'nightstand_closeup'):
+            assert f"{code}/{product_image_name(number, archived['archived_at'], slot)}" in file_list
+        assert f"METADATA-{code}.json" in file_list
 
         # 验证图片字节可解析且为合法 PNG
-        img_bytes = zf.read(f"{code}/{code}_panorama_v1_watermarked.png")
+        img_bytes = zf.read(f"{code}/{product_image_name(number, archived['archived_at'], 'panorama')}")
         with Image.open(io.BytesIO(img_bytes)) as parsed_img:
             assert parsed_img.format == "PNG"
             assert parsed_img.size == (1024, 1024)

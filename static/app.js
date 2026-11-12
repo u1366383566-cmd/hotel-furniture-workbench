@@ -1858,7 +1858,7 @@ async function renderArchivedTab() {
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
-        <label class="text-xs font-bold text-inkTitle font-mono">${d.status === 'archived' ? `<input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出">` : ''} ${escapeText(d.design_code)}</label>
+        <label class="text-xs font-bold text-inkTitle font-mono">${d.status === 'archived' && d.product_code ? `<input type="checkbox" data-select="export" data-id="${d.id}" aria-label="选择${escapeText(d.design_code)}导出">` : ''} ${escapeText(d.product_code || d.design_code)} ${d.product_code ? `· ${escapeText(d.design_code)}` : d.status === 'archived' ? '· 已归档，未分配正式编号' : ''}</label>
         <div class="flex items-center gap-1.5">
           ${alreadyExported ? '<span class="wb-badge" style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0;">↓ 已导出</span>' : ''}
           <span class="wb-badge wb-badge-emerald">${d.status === 'archived' ? '✓ 已完成' : '已淘汰'}</span>
@@ -1879,7 +1879,7 @@ async function renderArchivedTab() {
       <details class="workbench-details"><summary>查看完整套图与设计说明</summary><p>系列：${escapeText(d.series_name || '')}</p><p>材质：${escapeText((d.structured_spec.main_materials || []).join('、'))}</p><p>配色：${escapeText((d.structured_spec.color_scheme || []).join('、'))}</p></details>
       <div class="pt-2 flex justify-end gap-2">
         <button class="wb-btn wb-btn-ghost" data-action="archived-compare" data-id="${d.id}">对照与核实</button>
-        ${d.status === 'archived' ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">${alreadyExported ? '再次导出 ZIP' : '导出单款 ZIP'}</button>` : ''}
+        ${d.status === 'archived' && d.product_code ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">${alreadyExported ? '再次导出 ZIP' : '导出单款 ZIP'}</button>` : ''}
       </div>
     `;
     container.appendChild(card);
@@ -1913,6 +1913,7 @@ function renderExportRecords(records) {
     item.innerHTML = `
       <div class="min-w-0 flex items-center gap-2">
         <span class="font-semibold text-inkBody font-mono truncate">${escapeText(r.file_name)}</span>
+        ${r.product_code ? `<span class="font-mono">${escapeText(r.product_code)}</span>` : ''}
         <span class="text-[10px] text-slate-300 shrink-0">${escapeText(r.export_type)}</span>
       </div>
       <div class="flex items-center gap-2 shrink-0">

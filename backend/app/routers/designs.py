@@ -17,6 +17,7 @@ from ..budget_service import reserve_budget, BudgetWarningExceededError, BudgetH
 from ..config import DEFAULT_REDO_SLOT_LIMIT, DEFAULT_REDO_DESIGN_LIMIT, RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, DEFAULT_WATERMARK
 from ..watermark_service import apply_watermark
 from ..planning_service import build_mock_visual_features, build_slot_prompt
+from ..product_numbering import format_product_code, allocate_product_number
 
 router = APIRouter(prefix="/api/designs", tags=["Designs"])
 
@@ -94,6 +95,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         series_id=d_row["series_id"],
         series_name=spec.get("series_name", d_row["series_id"]),
         design_code=d_row["design_code"],
+        product_code=format_product_code(d_row['product_number']) if d_row['product_number'] is not None else None,
         is_standby=bool(d_row["is_standby"]),
         status=d_row["status"],
         planning_status=d_row["planning_status"],
@@ -569,6 +571,8 @@ def review_quad(
             raise HTTPException(status_code=400, detail=f"设计已处于 '{design_status}' 状态，不可重复终审！")
         if req.action not in ("archive", "eliminate"):
             raise HTTPException(status_code=400, detail="未知的终审动作")
+        if req.action == 'archive' and not conn.execute('SELECT ready FROM product_number_state WHERE id=1').fetchone()['ready']:
+            raise HTTPException(status_code=409, detail='历史产品编号尚未确认完成，暂不能归档，请联系管理员')
 
         required_types = {"panorama", "white_isolated", "twin_bed", "nightstand_closeup"}
         expected_map = req.expected_slot_versions
@@ -697,11 +701,12 @@ def review_quad(
             conn.execute("UPDATE slot_versions SET is_locked = 1 WHERE id = ?", (row["vid"],))
             conn.execute("UPDATE slots SET status = 'approved' WHERE id = ?", (row["slot_id"],))
 
+        number = allocate_product_number(conn)
         conn.execute("""
             UPDATE designs
-            SET status = 'archived', archived_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime')
+            SET status = 'archived', product_number = ?, archived_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime')
             WHERE id = ?
-        """, (design_id,))
+        """, (number, design_id))
         conn.execute("UPDATE batches SET current_archived_count = current_archived_count + 1 WHERE id = ?", (batch_id,))
 
         b_curr = cur.execute(
