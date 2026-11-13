@@ -27,7 +27,7 @@ function candidateList(candidates) {
     const card = element('div', undefined, 'p-3 rounded-xl border border-lineLight bg-slate-50');
     card.appendChild(element('strong', `${item.design_code} · ${item.feature_source} · 相似部位：${item.matched_fields.join('、')}`, 'text-xs'));
     if (item.preview_version_id) {
-      const img = element('img'); img.src = withBase(`/api/media/preview/${encodeURIComponent(item.preview_version_id)}`); img.alt = `${item.design_code} 历史全景预览`; img.style.maxWidth = '180px'; img.className = 'rounded-xl mt-2'; card.appendChild(img);
+      const img = element('img'); img.src = withBase(`/api/media/preview/${encodeURIComponent(item.preview_version_id)}`); img.alt = `${item.design_code} 历史全景预览`; img.style.maxWidth = '180px'; img.className = 'rounded-xl mt-2 lazy-media'; img.loading = 'lazy'; img.decoding = 'async'; img.fetchPriority = 'low'; card.appendChild(img);
     }
     for (const [key, label] of planFields.slice(0, 4)) card.appendChild(element('p', `${label}：${item.features[key] || '未记录'}`, 'text-xs text-inkMuted'));
     wrap.appendChild(card);

@@ -3,9 +3,11 @@ import logging
 import uuid
 import sqlite3
 import io
+import hashlib
 from PIL import Image
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import Response
 from ..database import get_db
 from ..models import (
     DesignDetail, SlotDetail, SlotVersionDetail, PanoramaReviewRequest, QuadReviewRequest
@@ -32,7 +34,8 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
     # 获取 4 个槽位
     cur.execute("SELECT * FROM slots WHERE design_id = ?", (design_id,))
     slot_rows = cur.fetchall()
-    task_rows = conn.execute("""SELECT slot_version_id,retry_after,failure_stage
+    task_rows = conn.execute("""SELECT slot_version_id,retry_after,failure_stage,
+        auto_retry_count,retry_status
         FROM tasks WHERE design_id=? ORDER BY created_at DESC""", (design_id,)).fetchall()
     tasks_by_version = {}
     for task_row in task_rows:
@@ -52,6 +55,18 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         curr_v_detail = None
         for vr in v_rows:
             task_info = tasks_by_version.get(vr["id"])
+            attempts = [
+                dict(row) for row in conn.execute(
+                    """SELECT attempt_no,started_at,finished_at,outcome,error_type,
+                              error_message,next_retry_at,ledger_id,upstream_request_id
+                       FROM image_generation_attempts
+                       WHERE task_id=(SELECT id FROM tasks
+                                      WHERE slot_version_id=?
+                                      ORDER BY created_at DESC LIMIT 1)
+                       ORDER BY attempt_no DESC""",
+                    (vr["id"],),
+                ).fetchall()
+            ]
             # 权限隔离：非管理员严禁返回底层磁盘原始图片路径
             raw_path_exposed = vr["raw_image_path"] if is_admin else None
 
@@ -76,6 +91,10 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
                 depends_on_panorama_version_id=vr["depends_on_panorama_version_id"],
                 error_message=vr["error_message"],
                 is_unknown=bool(vr["is_unknown"]),
+                auto_retry_count=int(task_info["auto_retry_count"] or 0) if task_info else 0,
+                retry_status=task_info["retry_status"] if task_info else None,
+                next_retry_at=task_info["retry_after"] if task_info else None,
+                generation_attempts=attempts,
                 created_at=vr["created_at"]
             )
             versions_list.append(v_det)
@@ -239,6 +258,226 @@ def list_batch_designs(
         cur.execute("SELECT id FROM designs WHERE batch_id = ? ORDER BY is_standby ASC, created_at ASC", (batch_id,))
         rows = cur.fetchall()
         return [_load_design_detail(conn, r["id"], is_admin=user.is_system_admin) for r in rows]
+
+
+def _compact_prompt_metadata(value: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not value:
+        return None
+    try:
+        raw = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    allowed = {
+        "panorama_view",
+        "reference_version_id",
+        "reference_panorama_version_id",
+        "prompt_status",
+        "generation_mode",
+        "generation_pipeline",
+        "upstream_model",
+    }
+    return {key: raw[key] for key in allowed if key in raw}
+
+
+@router.get("/batch/{batch_id}/summary")
+def list_batch_design_summary(
+    batch_id: str,
+    request: Request,
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"])),
+):
+    """Compact polling payload containing only each slot's current version."""
+    with get_db(immediate=False) as conn:
+        design_rows = conn.execute(
+            """SELECT * FROM designs WHERE batch_id=?
+               ORDER BY is_standby ASC, created_at ASC""",
+            (batch_id,),
+        ).fetchall()
+        if not design_rows:
+            if conn.execute("SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone() is None:
+                raise HTTPException(404, "任务不存在")
+
+        slot_rows = conn.execute(
+            """SELECT s.*,sv.id AS version_id,sv.version_num,sv.attempt_num,
+                      sv.preview_image_path,sv.prompt_metadata,sv.is_mock,
+                      sv.upstream_request_id,sv.process_status,sv.is_locked,
+                      sv.is_invalidated,sv.depends_on_panorama_version_id,
+                      sv.error_message,sv.is_unknown,sv.created_at AS version_created_at,
+                      (SELECT COUNT(*) FROM slot_versions hv WHERE hv.slot_id=s.id)
+                          AS history_count
+               FROM slots s
+               JOIN designs d ON d.id=s.design_id
+               LEFT JOIN slot_versions sv ON sv.id=s.current_version_id
+               WHERE d.batch_id=?""",
+            (batch_id,),
+        ).fetchall()
+
+        task_rows = conn.execute(
+            """SELECT t.* FROM tasks t JOIN designs d ON d.id=t.design_id
+               WHERE d.batch_id=? ORDER BY t.created_at DESC,t.id DESC""",
+            (batch_id,),
+        ).fetchall()
+        tasks_by_version = {}
+        task_ids = []
+        for row in task_rows:
+            task_ids.append(row["id"])
+            tasks_by_version.setdefault(row["slot_version_id"], row)
+        attempt_counts = {}
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            for row in conn.execute(
+                f"""SELECT task_id,COUNT(*) AS attempt_count,MAX(attempt_no) AS last_attempt_no
+                    FROM image_generation_attempts
+                    WHERE task_id IN ({placeholders}) GROUP BY task_id""",
+                task_ids,
+            ):
+                attempt_counts[row["task_id"]] = dict(row)
+
+        upload_rows = conn.execute(
+            """SELECT j.* FROM nas_upload_jobs j JOIN designs d ON d.id=j.design_id
+               WHERE d.batch_id=?""",
+            (batch_id,),
+        ).fetchall()
+        uploads = {row["design_id"]: dict(row) for row in upload_rows}
+        if upload_rows:
+            job_ids = [row["id"] for row in upload_rows]
+            placeholders = ",".join("?" for _ in job_ids)
+            for item in conn.execute(
+                f"""SELECT job_id,slot_type,filename,status FROM nas_upload_items
+                    WHERE job_id IN ({placeholders}) ORDER BY filename""",
+                job_ids,
+            ):
+                upload = next(
+                    (candidate for candidate in uploads.values()
+                     if candidate["id"] == item["job_id"]),
+                    None,
+                )
+                if upload is not None:
+                    upload.setdefault("items", []).append(dict(item))
+
+        exports = {
+            row["design_id"]: {
+                "count": row["export_count"],
+                "last_exported_at": row["last_exported_at"],
+            }
+            for row in conn.execute(
+                """SELECT design_id,COUNT(*) AS export_count,MAX(created_at) AS last_exported_at
+                   FROM export_records WHERE batch_id=? AND design_id IS NOT NULL
+                   GROUP BY design_id""",
+                (batch_id,),
+            )
+        }
+
+    slots_by_design: Dict[str, Dict[str, Any]] = {}
+    for row in slot_rows:
+        task = tasks_by_version.get(row["version_id"])
+        attempt = attempt_counts.get(task["id"], {}) if task else {}
+        current_version = None
+        if row["version_id"]:
+            current_version = {
+                "id": row["version_id"],
+                "slot_id": row["id"],
+                "design_id": row["design_id"],
+                "version_num": row["version_num"],
+                "attempt_num": row["attempt_num"],
+                "preview_image_path": row["preview_image_path"],
+                "prompt_metadata": _compact_prompt_metadata(row["prompt_metadata"]),
+                "is_mock": bool(row["is_mock"]),
+                "upstream_request_id": row["upstream_request_id"],
+                "process_status": row["process_status"],
+                "retry_after": task["retry_after"] if task else None,
+                "failure_stage": task["failure_stage"] if task else None,
+                "is_locked": bool(row["is_locked"]),
+                "is_invalidated": bool(row["is_invalidated"]),
+                "depends_on_panorama_version_id": row["depends_on_panorama_version_id"],
+                "error_message": row["error_message"],
+                "is_unknown": bool(row["is_unknown"]),
+                "auto_retry_count": int(task["auto_retry_count"] or 0) if task else 0,
+                "retry_status": task["retry_status"] if task else None,
+                "next_retry_at": task["retry_after"] if task else None,
+                "attempt_count": int(attempt.get("attempt_count", 0)),
+                "last_attempt_no": int(attempt.get("last_attempt_no", 0)),
+                "created_at": row["version_created_at"],
+            }
+        slots_by_design.setdefault(row["design_id"], {})[row["slot_type"]] = {
+            "id": row["id"],
+            "design_id": row["design_id"],
+            "slot_type": row["slot_type"],
+            "current_version_id": row["current_version_id"],
+            "status": row["status"],
+            "redo_count": row["redo_count"],
+            "technical_retry_count": row["technical_retry_count"],
+            "updated_at": row["updated_at"],
+            "history_count": int(row["history_count"] or 0),
+            "current_version": current_version,
+        }
+
+    result = []
+    for row in design_rows:
+        spec = json.loads(row["structured_spec"]) if row["structured_spec"] else {}
+        design_slots = slots_by_design.get(row["id"], {})
+        revision_parts = [row["updated_at"], row["status"], row["planning_status"]]
+        for slot in design_slots.values():
+            version = slot["current_version"] or {}
+            revision_parts.extend(
+                [
+                    slot["updated_at"],
+                    slot["status"],
+                    str(slot["current_version_id"] or ""),
+                    str(version.get("process_status") or ""),
+                    str(version.get("failure_stage") or ""),
+                    str(version.get("retry_status") or ""),
+                    str(version.get("auto_retry_count") or 0),
+                ]
+            )
+        export_info = exports.get(row["id"], {"count": 0, "last_exported_at": None})
+        upload = uploads.get(row["id"])
+        if upload:
+            revision_parts.extend([upload.get("updated_at"), upload.get("status")])
+        if export_info["last_exported_at"]:
+            revision_parts.append(export_info["last_exported_at"])
+        result.append(
+            {
+                "id": row["id"],
+                "batch_id": row["batch_id"],
+                "series_id": row["series_id"],
+                "series_name": spec.get("series_name", row["series_id"]),
+                "design_code": row["design_code"],
+                "product_code": format_product_code(row["product_number"])
+                if row["product_number"] is not None else None,
+                "nas_upload": upload,
+                "is_standby": bool(row["is_standby"]),
+                "status": row["status"],
+                "planning_status": row["planning_status"],
+                "structured_spec": spec,
+                "visual_features": json.loads(row["visual_features"])
+                if row["visual_features"] else None,
+                "elimination_reason": row["elimination_reason"],
+                "elimination_comment": row["elimination_comment"],
+                "archived_at": row["archived_at"],
+                "total_redo_count": row["total_redo_count"],
+                "slots": design_slots,
+                "exported": bool(export_info["count"]),
+                "export_count": int(export_info["count"]),
+                "last_exported_at": export_info["last_exported_at"],
+                "state_revision": hashlib.sha1(
+                    "|".join(str(value or "") for value in revision_parts).encode()
+                ).hexdigest(),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+
+    payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    etag = '"' + hashlib.sha256(payload.encode()).hexdigest() + '"'
+    candidates = [
+        value.strip().removeprefix("W/")
+        for value in request.headers.get("if-none-match", "").split(",")
+    ]
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if etag in candidates or "*" in candidates:
+        return Response(status_code=304, headers=headers)
+    return Response(content=payload, media_type="application/json", headers=headers)
+
 
 @router.get("/{design_id}", response_model=DesignDetail)
 def get_design_by_id(

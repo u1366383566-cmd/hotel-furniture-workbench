@@ -452,7 +452,7 @@ def run_browser_verification():
                   ].join('');
                 }
             """)
-            for expected in ("等待限流重试", "结果待核账", "上游扣费未知，重做可能再次计费", "参考图片不可用，等待恢复"):
+            for expected in ("等待技术重试", "结果待核账", "上游扣费未知，重做可能再次计费", "参考图片不可用，等待恢复"):
                 assert expected in status_html, f"页面缺少状态提示: {expected}"
             print("   retry and unknown-image status messages rendered.")
 

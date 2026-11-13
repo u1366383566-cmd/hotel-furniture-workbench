@@ -12,6 +12,10 @@ const state = {
   currentBatchId: null,
   batches: [],
   designs: [],
+  designDetails: new Map(),
+  designSummaryEtag: null,
+  technicalFailures: [],
+  exportRecordsBatch: null,
   budget: null,
   seriesRules: {},
   activeTab: 'panorama',
@@ -52,6 +56,26 @@ async function apiFetch(url, options = {}) {
   return res.json();
 }
 
+async function fetchDesignSummary(batchId) {
+  const headers = authHeaders(false);
+  if (state.designSummaryEtag) headers['If-None-Match'] = state.designSummaryEtag;
+  const response = await fetch(withBase(`/api/designs/batch/${encodeURIComponent(batchId)}/summary`), {
+    headers,
+    cache: 'no-store',
+  });
+  if (response.status === 304) return null;
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const body = await response.json();
+      message = body.detail || body.message || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+  state.designSummaryEtag = response.headers.get('etag');
+  return response.json();
+}
+
 async function downloadAuthenticatedZip(url, fallbackName) {
   const response = await fetch(withBase(url), {method: 'HEAD', headers: authHeaders(false), cache: 'no-store'});
   if (!response.ok) throw new Error(response.status === 404 ? '导出文件不存在或已清理' : `下载准备失败 (${response.status})`);
@@ -78,7 +102,9 @@ async function runZipExport(url, options, description) {
     const result = await apiFetch(url, options);
     await downloadAuthenticatedZip(result.download_url, result.file_name);
     status.textContent = `打包完成，已交给浏览器下载：${result.file_name}。请查看浏览器下载列表。`;
-    await renderArchivedTab();
+    state.exportRecordsBatch = null;
+    await loadDesigns(true);
+    await loadExportRecords();
   } catch (error) {
     status.textContent = `导出失败：${error.message}`;
     showToast(error.message, true);
@@ -367,6 +393,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       polling = false;
     }
   }, 8000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.currentBatchId) {
+      loadDesigns(false).then(() => loadBudget());
+    }
+  });
 });
 
 // 角色切换（胶囊分段）
@@ -385,6 +416,7 @@ function setupRoleSelector() {
       showToast(`已切换身份为: ${roleLabel}`);
       updateBudgetUI();
       renderCurrentTab();
+      loadTechnicalFailures();
     });
   });
 }
@@ -874,6 +906,9 @@ async function onBatchChanged() {
   document.getElementById('edit-batch-series-panel').classList.add('hidden');
   document.getElementById('edit-batch-series').setAttribute('aria-expanded', 'false');
   panoramaSimilarityCache.clear();
+  state.designDetails.clear();
+  state.designSummaryEtag = null;
+  state.exportRecordsBatch = null;
   const statusEl = document.getElementById('current-batch-status');
   if (curBatch) {
     document.getElementById('current-batch-name').innerText = curBatch.name;
@@ -904,6 +939,7 @@ async function onBatchChanged() {
   document.getElementById('rule-snapshot-status').innerText = snapshotText;
   await loadBudget();
   await loadDesigns(true);
+  await loadTechnicalFailures();
   await loadPlanningPanel();
   await loadWatermarkConfig();
   await loadAuditLogs();
@@ -972,8 +1008,13 @@ function updateBudgetUI() {
 async function loadDesigns(forceRender = false) {
   if (!state.currentBatchId) return;
   try {
-    const designs = await apiFetch(`/api/designs/batch/${state.currentBatchId}`);
+    const designs = await fetchDesignSummary(state.currentBatchId);
+    if (designs === null) return;
     state.designs = designs;
+    const liveIds = new Set(designs.map(item => item.id));
+    for (const designId of state.designDetails.keys()) {
+      if (!liveIds.has(designId)) state.designDetails.delete(designId);
+    }
 
     const archivedCount = designs.filter(d => d.status === 'archived').length;
     document.getElementById('metric-archived').innerText = archivedCount;
@@ -996,16 +1037,11 @@ async function loadDesigns(forceRender = false) {
 
     // 后台轮询只在数据真正变化时重绘，避免每 3 秒重建 DOM：
     // 既会吞掉用户点击，也会覆盖管理中心里正在填写的配置。
-    const signature = designs.map(d => [
-      d.id, d.status, d.planning_status, d.total_redo_count,
-      d.slots.panorama?.current_version_id, d.slots.panorama?.status, d.slots.panorama?.redo_count,
-      d.slots.white_isolated?.current_version_id, d.slots.white_isolated?.status,
-      d.slots.twin_bed?.current_version_id, d.slots.twin_bed?.status,
-      d.slots.nightstand_closeup?.current_version_id, d.slots.nightstand_closeup?.status,
-    ].join('|')).join(';');
+    const signature = designs.map(d => `${d.id}:${d.state_revision || ''}`).join(';');
     if (forceRender || signature !== state.designSignature) {
       state.designSignature = signature;
       renderCurrentTab(true);
+      loadTechnicalFailures();
     }
   } catch (e) {
     console.error('加载设计组失败:', e);
@@ -1030,6 +1066,69 @@ function renderCurrentTab(background = false) {
     loadTextApiConfig();
     loadUnknownTasks();
     loadAuditLogs();
+  }
+}
+
+const slotTypeLabels = {
+  panorama: '场景全景图',
+  white_isolated: '整套家具白底',
+  twin_bed: '双床白底',
+  nightstand_closeup: '床头区域近景',
+};
+
+async function loadTechnicalFailures() {
+  const panel = document.getElementById('technical-failures-panel');
+  if (!panel) return;
+  if (!state.currentBatchId) {
+    panel.classList.add('hidden');
+    state.technicalFailures = [];
+    return;
+  }
+  const requestedBatch = state.currentBatchId;
+  try {
+    const result = await apiFetch(`/api/workbench/batches/${requestedBatch}/technical-failures`);
+    if (state.currentBatchId !== requestedBatch) return;
+    state.technicalFailures = result.items || [];
+    const list = document.getElementById('technical-failures-list');
+    const actions = document.getElementById('technical-failures-actions');
+    const count = document.getElementById('technical-failures-count');
+    const canManage = ['leader', 'admin'].includes(state.currentRole);
+    count.textContent = String(state.technicalFailures.length);
+    panel.classList.toggle('hidden', state.technicalFailures.length === 0);
+    list.replaceChildren();
+    for (const item of state.technicalFailures) {
+      const row = document.createElement('div');
+      row.className = 'technical-failure-item';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.taskId = item.task_id;
+      checkbox.disabled = !item.retryable || !canManage;
+      checkbox.setAttribute('aria-label', `选择 ${item.design_code} ${slotTypeLabels[item.slot_type] || item.slot_type}`);
+      const info = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = `${item.design_code} · ${slotTypeLabels[item.slot_type] || item.slot_type}`;
+      const reason = document.createElement('div');
+      reason.className = 'technical-failure-error';
+      reason.title = item.last_error || item.reason || '';
+      reason.textContent = item.reason || item.last_error || '请求结果未知';
+      const meta = document.createElement('small');
+      meta.textContent = item.retryable
+        ? `已记录 ${item.attempt_count || 0} 次请求；确认后可重开最多 2 次自动重试`
+        : `不可重试：${item.reason || '状态已变化'}`;
+      info.append(title, reason, meta);
+      const status = document.createElement('span');
+      status.className = `wb-badge ${item.retryable ? 'wb-badge-amber' : 'wb-badge-slate'}`;
+      status.textContent = item.retryable ? '扣费未知' : '已失效/需处理';
+      row.append(checkbox, info, status);
+      list.appendChild(row);
+    }
+    const retryable = state.technicalFailures.some(item => item.retryable);
+    actions.classList.toggle('hidden', !canManage || !retryable);
+    document.getElementById('technical-failures-accept-risk').checked = false;
+    document.getElementById('technical-failures-select-all').checked = false;
+  } catch (error) {
+    panel.classList.add('hidden');
+    console.error('技术失败列表加载失败', error);
   }
 }
 
@@ -1207,6 +1306,10 @@ function escapeText(value) {
 }
 
 function panoStatusBadge(d, pSlot) {
+  const current = pSlot.current_version;
+  if (current?.retry_status === 'auto_retry_pending') {
+    return `<span class="wb-badge wb-badge-amber"><span class="dot-pulse"></span>自动重试 ${current.auto_retry_count || 1}/2</span>`;
+  }
   if (d.status === 'draft' && pSlot.status === 'empty') return '<span class="wb-badge wb-badge-slate">待启动</span>';
   if (d.status === 'panorama_approved') return '<span class="wb-badge wb-badge-emerald">全景已通过</span>';
   if (pSlot.status === 'generating') return '<span class="wb-badge wb-badge-blue"><span class="dot-pulse"></span>生成中</span>';
@@ -1250,8 +1353,10 @@ function paintSimilarityWarning(card, candidates) {
   else panoramaOpenDetails.delete(key);
 }
 
-async function refreshPanoramaSimilarities(container) {
-  const cards = [...container.querySelectorAll('[data-design-id]')];
+async function refreshPanoramaSimilarities(containerOrCards) {
+  const cards = Array.isArray(containerOrCards)
+    ? containerOrCards
+    : [...containerOrCards.querySelectorAll('[data-design-id]')];
   for (const card of cards) {
     const designId = card.dataset.designId;
     const design = state.designs.find(d => d.id === designId);
@@ -1270,6 +1375,41 @@ async function refreshPanoramaSimilarities(container) {
       console.warn('相似提醒读取失败', e);
     }
   }
+}
+
+function patchKeyedCards(container, items, buildCard) {
+  if (!items.length) {
+    container.innerHTML = `<div class="col-span-full wb-card" data-empty-card>${emptyState('当前暂无待处理设计', '任务状态变化后会自动刷新')}</div>`;
+    return [];
+  }
+  container.querySelector('[data-empty-card]')?.remove();
+  const existing = new Map(
+    [...container.querySelectorAll(':scope > [data-design-id]')]
+      .map(card => [card.dataset.designId, card])
+  );
+  const changedCards = [];
+  const ordered = [];
+  for (const item of items) {
+    const revision = item.state_revision || `${item.status || ''}:${item.updated_at || ''}`;
+    let card = existing.get(item.id);
+    if (!card || card.dataset.stateRevision !== revision) {
+      const next = buildCard(item);
+      next.dataset.designId = item.id;
+      next.dataset.stateRevision = revision;
+      if (card) card.replaceWith(next);
+      else container.appendChild(next);
+      card = next;
+      changedCards.push(next);
+    }
+    existing.delete(item.id);
+    ordered.push(card);
+  }
+  for (const stale of existing.values()) stale.remove();
+  ordered.forEach((card, index) => {
+    const current = container.children[index];
+    if (current !== card) container.insertBefore(card, current || null);
+  });
+  return changedCards;
 }
 
 // 重绘时保留美工已经展开的详情与相似提醒，避免轮询把展开状态收起来。
@@ -1298,27 +1438,26 @@ function restoreOpenDetails(card) {
 function renderPanoramaTab() {
   const container = document.getElementById('panorama-cards-grid');
   captureOpenDetails(container);
-  container.innerHTML = '';
   const batch = state.batches.find(b => b.id === state.currentBatchId);
   if (batch?.smart_planning && !batch.planning_confirmed) return;
   const panoDesigns = state.designs.filter(d => !d.is_standby && ['draft', 'panorama_generating', 'panorama_review'].includes(d.status));
 
   if (panoDesigns.length === 0) {
-    container.innerHTML = `<div class="col-span-full wb-card">${emptyState('全景初筛暂无待处理设计', '已全部通过或已归档；可从候补池或新建批次继续生产')}</div>`;
+    container.innerHTML = `<div class="col-span-full wb-card" data-empty-card>${emptyState('全景初筛暂无待处理设计', '已全部通过或已归档；可从候补池或新建批次继续生产')}</div>`;
     return;
   }
 
-  panoDesigns.forEach(d => {
+  const changedCards = patchKeyedCards(container, panoDesigns, d => {
     const pSlot = d.slots.panorama;
     const curVer = pSlot.current_version;
     const card = document.createElement('div');
-    card.className = 'wb-card overflow-hidden flex flex-col justify-between';
+    card.className = 'wb-card long-list-card overflow-hidden flex flex-col justify-between';
 
     let imgHtml = '';
     if (curVer && curVer.preview_image_path) {
       imgHtml = `
         <div class="relative w-full aspect-square bg-slate-100 overflow-hidden">
-          <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${d.design_code}" class="w-full h-full object-contain">
+          <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${d.design_code}" class="w-full h-full object-contain lazy-media" loading="lazy" decoding="async" fetchpriority="low">
           <div class="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-slate-900/70 text-white text-[11px] font-mono backdrop-blur-xs">
             ${d.design_code} · v${curVer.version_num}
           </div>
@@ -1346,15 +1485,15 @@ function renderPanoramaTab() {
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
           </svg>
-          全景图正在生成中（真实 API 约需 1-2 分钟）...
+          ${curVer?.retry_status === 'auto_retry_pending'
+            ? `上游请求失败，等待自动重试 ${curVer.auto_retry_count || 1}/2`
+            : '全景图正在生成中（真实 API 约需 1-2 分钟）...'}
         </div>
       `;
     }
 
     const spec = d.structured_spec;
     const isReady = pSlot.status === 'ready' && curVer;
-    card.dataset.designId = d.id;
-
     card.innerHTML = `
       ${imgHtml}
       <div class="p-4 flex-1 flex flex-col justify-between space-y-3">
@@ -1389,13 +1528,15 @@ function renderPanoramaTab() {
       </div>
     `;
 
-    container.appendChild(card);
+    card.dataset.designId = d.id;
     restoreOpenDetails(card);
+    return card;
   });
 
-  refreshPanoramaSimilarities(container);
+  refreshPanoramaSimilarities(changedCards);
 
-  container.querySelectorAll('.btn-approve-pano').forEach(b => {
+  const changedQuery = selector => changedCards.flatMap(card => [...card.querySelectorAll(selector)]);
+  changedQuery('.btn-approve-pano').forEach(b => {
     b.addEventListener('click', async () => {
       try {
         const result = await apiFetch(`/api/workbench/batches/${state.currentBatchId}/approve-panoramas`, {
@@ -1412,11 +1553,11 @@ function renderPanoramaTab() {
   });
   syncBulkSelections();
 
-  container.querySelectorAll('[data-action="pano-compare"]').forEach(b => {
+  changedQuery('[data-action="pano-compare"]').forEach(b => {
     b.addEventListener('click', () => showComparison(b.dataset.id));
   });
 
-  container.querySelectorAll('.btn-redo-pano').forEach(b => {
+  changedQuery('.btn-redo-pano').forEach(b => {
     b.addEventListener('click', () => {
       openRedoModal({
         type: 'panorama',
@@ -1429,7 +1570,7 @@ function renderPanoramaTab() {
     });
   });
 
-  container.querySelectorAll('.btn-eliminate-pano').forEach(b => {
+  changedQuery('.btn-eliminate-pano').forEach(b => {
     b.addEventListener('click', async () => {
       if (!confirm('确定淘汰此全景设计吗？系统将自动从候补池唤醒备选设计补齐目标缺口。')) return;
       try {
@@ -1481,15 +1622,25 @@ function openRedoModal(ctx) {
   document.getElementById('modal-redo').classList.remove('hidden');
 }
 
-document.addEventListener('click', event => {
+document.addEventListener('click', async event => {
   const button = event.target.closest('.prompt-view');
   if (!button) return;
-  const design = state.designs.find(d => d.id === button.dataset.designId);
+  button.disabled = true;
+  let design;
+  try {
+    design = await apiFetch(`/api/designs/${encodeURIComponent(button.dataset.designId)}`);
+    state.designDetails.set(design.id, design);
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+    return;
+  }
+  button.disabled = false;
   const slot = design?.slots?.[button.dataset.slotType];
   if (!slot?.current_version) return;
   const dialog = document.createElement('dialog');
   dialog.className = 'prompt-dialog';
-  const title = document.createElement('h3'); title.textContent = '图片提示词与参考版本';
+  const title = document.createElement('h3'); title.textContent = '图片提示词与历史版本';
   const select = document.createElement('select'); select.className = 'wb-input'; select.setAttribute('aria-label', '查看提示词的图片版本');
   const versions = slot.history_versions || [slot.current_version];
   for (const version of versions) { const option = document.createElement('option'); option.value = version.id; option.textContent = `版本 ${version.version_num}`; option.selected = version.id === slot.current_version.id; select.appendChild(option); }
@@ -1498,6 +1649,7 @@ document.addEventListener('click', event => {
   const status = document.createElement('p');
   const actions = document.createElement('div'); actions.className = 'prompt-dialog-actions';
   const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'wb-btn wb-btn-dark'; edit.textContent = '编辑并重做';
+  const selectVersion = document.createElement('button'); selectVersion.type = 'button'; selectVersion.className = 'wb-btn wb-btn-ghost'; selectVersion.textContent = '回选此版本';
   const close = document.createElement('button'); close.type = 'button'; close.className = 'wb-btn wb-btn-ghost'; close.textContent = '关闭'; close.onclick = () => dialog.close();
   const refresh = () => {
     const version = versions.find(v => v.id === select.value); const meta = version?.prompt_metadata || {};
@@ -1508,9 +1660,26 @@ document.addEventListener('click', event => {
     promptText.textContent = meta.real_prompt || meta.prepared_prompt || '该版本未记录实际提示词';
     status.textContent = meta.prompt_status === 'prepared' ? '以下为准备发送的提示词，生成未成功；无法确认上游是否收到。' : '';
     edit.hidden = select.value !== slot.current_version_id || !meta.real_prompt || ['archived','eliminated'].includes(design.status) || slot.status === 'generating';
+    selectVersion.hidden = select.value === slot.current_version_id || ['archived','eliminated'].includes(design.status);
     edit.onclick = () => { dialog.close(); openRedoModal({type:'slot', designId:design.id, slotId:slot.id, versionId:slot.current_version_id, redoCount:slot.redo_count, totalRedo:design.total_redo_count, editPrompt:true, promptText:meta.real_prompt}); };
+    selectVersion.onclick = async () => {
+      selectVersion.disabled = true;
+      try {
+        await apiFetch(`/api/slots/${slot.id}/select_version`, {
+          method: 'POST',
+          body: JSON.stringify({slot_id: slot.id, version_id: select.value}),
+        });
+        showToast('已回选历史版本');
+        dialog.close();
+        await loadDesigns(true);
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        selectVersion.disabled = false;
+      }
+    };
   };
-  select.onchange = refresh; actions.append(edit,close); dialog.append(title,select,reference,promptText,status,actions);
+  select.onchange = refresh; actions.append(edit,selectVersion,close); dialog.append(title,select,reference,promptText,status,actions);
   dialog.addEventListener('close', () => dialog.remove()); document.body.appendChild(dialog); refresh(); dialog.showModal();
 });
 
@@ -1518,17 +1687,16 @@ document.addEventListener('click', event => {
 
 function renderQuadTab() {
   const container = document.getElementById('quad-designs-list');
-  container.innerHTML = '';
 
   const quadDesigns = state.designs.filter(d => !d.is_standby && ['panorama_approved', 'downstream_generating', 'quad_review'].includes(d.status));
   if (quadDesigns.length === 0) {
-    container.innerHTML = `<div class="wb-card">${emptyState('暂无进入四图阶段的设计', '需先在全景初筛中通过至少一款设计')}</div>`;
+    container.innerHTML = `<div class="wb-card" data-empty-card>${emptyState('暂无进入四图阶段的设计', '需先在全景初筛中通过至少一款设计')}</div>`;
     return;
   }
 
-  quadDesigns.forEach(d => {
+  const changedCards = patchKeyedCards(container, quadDesigns, d => {
     const card = document.createElement('div');
-    card.className = 'wb-card p-5 space-y-4';
+    card.className = 'wb-card long-list-card p-5 space-y-4';
 
     const slots = d.slots;
     const pSlot = slots.panorama;
@@ -1575,12 +1743,13 @@ function renderQuadTab() {
       </div>
     `;
 
-    container.appendChild(card);
+    return card;
   });
 
-  initCustomSelects(container);
+  changedCards.forEach(card => initCustomSelects(card));
+  const changedQuery = selector => changedCards.flatMap(card => [...card.querySelectorAll(selector)]);
 
-  container.querySelectorAll('.btn-start-downstream').forEach(b => {
+  changedQuery('.btn-start-downstream').forEach(b => {
     b.addEventListener('click', async () => {
       const designId = b.dataset.id;
       const run = async () => {
@@ -1598,7 +1767,7 @@ function renderQuadTab() {
   });
   syncBulkSelections();
 
-  container.querySelectorAll('.btn-archive-quad').forEach(b => {
+  changedQuery('.btn-archive-quad').forEach(b => {
     b.addEventListener('click', async () => {
       const design = state.designs.find(item => item.id === b.dataset.id);
       try {
@@ -1619,7 +1788,7 @@ function renderQuadTab() {
     });
   });
 
-  container.querySelectorAll('.btn-eliminate-quad').forEach(b => {
+  changedQuery('.btn-eliminate-quad').forEach(b => {
     b.addEventListener('click', async () => {
       const design = state.designs.find(item => item.id === b.dataset.id);
       if (!confirm('确定终审淘汰整组四图吗？将作废全部槽位并自动唤醒候补。')) return;
@@ -1641,7 +1810,7 @@ function renderQuadTab() {
     });
   });
 
-  container.querySelectorAll('.btn-slot-redo').forEach(b => {
+  changedQuery('.btn-slot-redo').forEach(b => {
     b.addEventListener('click', () => {
       openRedoModal({
         type: 'slot',
@@ -1654,7 +1823,7 @@ function renderQuadTab() {
     });
   });
 
-  container.querySelectorAll('.slot-version-select').forEach(sel => {
+  changedQuery('.slot-version-select').forEach(sel => {
     sel.addEventListener('change', async (e) => {
       const slotId = sel.dataset.slotId;
       const slotType = sel.dataset.slotType;
@@ -1710,7 +1879,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
   if (curVer && curVer.preview_image_path) {
     imgArea = `
       <div class="relative w-full aspect-square bg-slate-100 rounded-xl overflow-hidden border border-lineLight">
-        <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${design.design_code} ${label}" class="w-full h-full object-contain">
+        <img src="${withBase(`/api/media/preview/${curVer.id}`)}" alt="${design.design_code} ${label}" class="w-full h-full object-contain lazy-media" loading="lazy" decoding="async" fetchpriority="low">
         ${
           isInvalidated
           ? `<div class="absolute inset-0 bg-rose-900/60 backdrop-blur-xs flex items-center justify-center text-white text-xs font-bold p-2 text-center">
@@ -1734,7 +1903,9 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
           <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
         </svg>
         生成失败
-        ${curVer.failure_stage === 'request_charge_unknown' ? '<span class="mt-2 text-amber-700">上游扣费未知，重做可能再次计费</span>' : ''}
+        ${curVer.retry_status === 'retry_exhausted'
+          ? '<span class="mt-2 text-amber-700">自动重试 2 次仍失败；上游扣费未知</span>'
+          : curVer.failure_stage === 'request_charge_unknown' ? '<span class="mt-2 text-amber-700">上游扣费未知，重做可能再次计费</span>' : ''}
       </div>
     `;
   } else {
@@ -1743,8 +1914,10 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
         ${
           waitingWhite
           ? (whiteFailed ? '等待白底图重做成功' : '等待白底图完成')
+          : isGenerating && curVer?.retry_status === 'auto_retry_pending'
+          ? `等待自动重试 ${curVer.auto_retry_count || 1}/2`
           : isGenerating && curVer?.process_status === 'pending' && curVer?.retry_after
-          ? '等待限流重试'
+          ? '等待技术重试'
           : isGenerating && curVer?.process_status === 'pending'
           ? '排队等待生成'
           : isGenerating
@@ -1784,7 +1957,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
           ${imgArea}
         </div>
         ${historyOptions}
-        ${!isPanorama && curVer ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${design.id}" data-slot-type="${slot.slot_type}">查看提示词</button>` : ''}
+        ${!isPanorama && curVer ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${design.id}" data-slot-type="${slot.slot_type}">${slot.history_count > 1 ? '提示词与历史版本' : '查看提示词'}</button>` : ''}
         ${!isPanorama && ['twin_bed','nightstand_closeup'].includes(slot.slot_type) && (curVer?.prompt_metadata?.reference_version_id || curVer?.prompt_metadata?.reference_panorama_version_id) && design.slots.white_isolated?.current_version_id !== (curVer.prompt_metadata.reference_version_id || curVer.prompt_metadata.reference_panorama_version_id) ? '<p class="text-xs text-amber-700">参考的白底组合图版本与当前版本不同</p>' : ''}
       </div>
 
@@ -1818,7 +1991,7 @@ function renderStandbyTab() {
   standbyDesigns.forEach(d => {
     const spec = d.structured_spec;
     const card = document.createElement('div');
-    card.className = 'wb-card p-4 space-y-3';
+    card.className = 'wb-card long-list-card p-4 space-y-3';
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
         <span class="text-xs font-bold text-inkTitle font-mono">${escapeText(d.design_code)}</span>
@@ -1843,32 +2016,20 @@ function renderStandbyTab() {
 
 async function renderArchivedTab() {
   const container = document.getElementById('archived-designs-grid');
-  container.innerHTML = '';
   const batchId = state.currentBatchId;
-
-  // Build a Set of design IDs that appear in export records so each card can
-  // show an "已导出" badge.  Also refresh the records list at the same time.
-  const exportedDesignIds = new Set();
-  try {
-    const records = await apiFetch(`/api/export/records/${batchId}`);
-    if (state.currentBatchId !== batchId) return;
-    renderExportRecords(records);
-    records.forEach(r => { if (r.design_id) exportedDesignIds.add(r.design_id); });
-  } catch (e) {}
-  if (state.currentBatchId !== batchId) return;
 
   const archived = state.designs.filter(d => ['archived', 'eliminated'].includes(d.status));
 
   if (archived.length === 0) {
-    container.innerHTML = `<div class="col-span-full wb-card">${emptyState('当前批次暂无已归档的设计成果', '完成四图终审归档后，可在此导出带水印 ZIP')}</div>`;
+    container.innerHTML = `<div class="col-span-full wb-card" data-empty-card>${emptyState('当前批次暂无已归档的设计成果', '完成四图终审归档后，可在此导出带水印 ZIP')}</div>`;
     return;
   }
 
-  archived.forEach(d => {
+  const changedCards = patchKeyedCards(container, archived, d => {
     const card = document.createElement('div');
-    card.className = 'wb-card p-4 space-y-3';
+    card.className = 'wb-card long-list-card p-4 space-y-3';
     const slots = d.slots;
-    const alreadyExported = exportedDesignIds.has(d.id);
+    const alreadyExported = Boolean(d.exported);
     const nasStatus = {held:'等待开启自动上传',queued:'待上传',uploading:'上传中',verifying:'处理中',waiting:'等待重试',awaiting_review:'已上传，待人工确认',success:'上传完成（人工确认）',failed:'上传失败',conflict:'上传冲突'};
     const nas = d.nas_upload;
 
@@ -1888,7 +2049,7 @@ async function renderArchivedTab() {
           const sl = slots[stype];
           const vid = sl && sl.current_version ? sl.current_version.id : null;
           return vid
-            ? `<div><img src="${withBase(`/api/media/preview/${vid}`)}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight" title="${stype}">${stype !== 'panorama' ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${d.id}" data-slot-type="${stype}">查看提示词</button>` : ''}</div>`
+            ? `<div><img src="${withBase(`/api/media/preview/${vid}`)}" alt="${d.design_code} ${stype}" class="w-full aspect-square object-cover rounded-lg border border-lineLight lazy-media" loading="lazy" decoding="async" fetchpriority="low" title="${stype}">${stype !== 'panorama' ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${d.id}" data-slot-type="${stype}">查看提示词</button>` : ''}</div>`
             : `<div class="w-full aspect-square bg-slate-100 rounded-lg"></div>`;
         }).join('')}
       </div>
@@ -1901,26 +2062,32 @@ async function renderArchivedTab() {
         ${d.status === 'archived' && d.product_code ? `<button class="btn-export-single wb-btn wb-btn-dark" data-id="${d.id}">${alreadyExported ? '再次导出 ZIP' : '导出单款 ZIP'}</button>` : ''}
       </div>
     `;
-    container.appendChild(card);
+    return card;
   });
+  const changedQuery = selector => changedCards.flatMap(card => [...card.querySelectorAll(selector)]);
 
-  container.querySelectorAll('[data-action="archived-compare"]').forEach(b => {
+  if (state.exportRecordsBatch !== batchId) {
+    state.exportRecordsBatch = batchId;
+    loadExportRecords();
+  }
+
+  changedQuery('[data-action="archived-compare"]').forEach(b => {
     b.addEventListener('click', () => showComparison(b.dataset.id));
   });
   syncBulkSelections();
 
-  container.querySelectorAll('.btn-export-single').forEach(b => {
+  changedQuery('.btn-export-single').forEach(b => {
     b.addEventListener('click', async () => {
       await runZipExport(`/api/export/design/${b.dataset.id}`, {method:'POST'}, '所选设计');
     });
   });
-  container.querySelectorAll('.btn-nas-upload').forEach(b => b.addEventListener('click', async () => {
+  changedQuery('.btn-nas-upload').forEach(b => b.addEventListener('click', async () => {
     try { const result=await apiFetch('/api/nas-upload/enqueue',{method:'POST',body:JSON.stringify({batch_id:state.currentBatchId,design_ids:[b.dataset.id]})});
       if (!result.results[0]?.ok) throw new Error(result.results[0]?.error || '无法加入上传');
       showToast('已加入 NAS 上传任务'); await loadDesigns(true);
     } catch(e) { showToast(e.message,true); }
   }));
-  container.querySelectorAll('.btn-nas-confirm').forEach(b => b.addEventListener('click', async () => {
+  changedQuery('.btn-nas-confirm').forEach(b => b.addEventListener('click', async () => {
     if (!confirm(`请先在 NAS 打开 ${b.dataset.code} 文件夹，确认四张图片、文件名和内容均正确。确认已检查？`)) return;
     try { await apiFetch(`/api/nas-upload/design/${encodeURIComponent(b.dataset.id)}/confirm`,{method:'POST',body:JSON.stringify({attested:true})});
       showToast('已记录 NAS 人工确认'); await loadDesigns(true);
@@ -1974,7 +2141,9 @@ async function loadExportRecords() {
   try {
     const records = await apiFetch(`/api/export/records/${state.currentBatchId}`);
     renderExportRecords(records);
-  } catch (e) {}
+  } catch (e) {
+    state.exportRecordsBatch = null;
+  }
 }
 
 // 加载结果未知任务列表

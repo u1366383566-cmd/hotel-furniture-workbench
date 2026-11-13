@@ -8,9 +8,15 @@ import uuid
 from datetime import datetime, timezone
 
 from ..database import get_db
+from ..config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
 from ..image_adapter import load_image_api_config
 from ..models import PanoramaReviewRequest, QuadReviewRequest
 from ..security import UserContext, require_roles
+from ..budget_service import (
+    reserve_budget,
+    BudgetWarningExceededError,
+    BudgetHardLimitExceededError,
+)
 from .designs import review_panorama, start_downstream, review_quad
 
 router = APIRouter(prefix='/api/workbench', tags=['Workbench'])
@@ -39,6 +45,7 @@ class BudgetSettings(BaseModel):
     warning_per_group: int = Field(8, ge=1, le=100)
     hard_limit_per_group: int = Field(10, ge=2, le=200)
     auto_release_unknown: Optional[bool] = None
+    auto_retry_request_failures: Optional[bool] = None
 
 
 class PanoramaSelection(BaseModel):
@@ -47,6 +54,11 @@ class PanoramaSelection(BaseModel):
 
 class QuadSelection(BaseModel):
     versions: Dict[str, Dict[str, str]]
+
+
+class TechnicalRetryRequest(BaseModel):
+    task_ids: List[str] = Field(min_length=1, max_length=100)
+    accept_unknown_charge: bool = False
 
 
 @router.get('/statistics')
@@ -83,8 +95,16 @@ def statistics(user: UserContext = Depends(require_roles(['operator','leader','a
 @router.get('/budget-settings')
 def budget_settings(user: UserContext = Depends(require_roles(['admin']))):
     with get_db() as conn:
-        r=conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone()
-        return {**dict(r), 'auto_release_unknown': bool(r['auto_release_unknown'])}
+        r=conn.execute(
+            """SELECT warning_per_group,hard_limit_per_group,auto_release_unknown,
+                      auto_retry_request_failures
+               FROM workbench_settings WHERE id='default'"""
+        ).fetchone()
+        return {
+            **dict(r),
+            'auto_release_unknown': bool(r['auto_release_unknown']),
+            'auto_retry_request_failures': bool(r['auto_retry_request_failures']),
+        }
 
 
 @router.put('/budget-settings')
@@ -92,9 +112,34 @@ def set_budget_settings(req: BudgetSettings, user: UserContext = Depends(require
     if req.hard_limit_per_group <= req.warning_per_group:
         raise HTTPException(400,'硬上限必须高于预警线')
     with get_db(immediate=True) as conn:
-        before=dict(conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone())
-        conn.execute("UPDATE workbench_settings SET warning_per_group=?,hard_limit_per_group=?,auto_release_unknown=COALESCE(?,auto_release_unknown) WHERE id='default'", (req.warning_per_group,req.hard_limit_per_group,None if req.auto_release_unknown is None else int(req.auto_release_unknown)))
-        after=dict(conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone())
+        setting_columns = """warning_per_group,hard_limit_per_group,auto_release_unknown,
+                             auto_retry_request_failures"""
+        before=dict(conn.execute(
+            f"SELECT {setting_columns} FROM workbench_settings WHERE id='default'"
+        ).fetchone())
+        effective_auto_release = (
+            before['auto_release_unknown']
+            if req.auto_release_unknown is None else int(req.auto_release_unknown)
+        )
+        if req.auto_retry_request_failures and not effective_auto_release:
+            raise HTTPException(400, '开启自动重试前必须同时接受失败请求的未知扣费风险')
+        conn.execute(
+            """UPDATE workbench_settings
+               SET warning_per_group=?,hard_limit_per_group=?,
+                   auto_release_unknown=COALESCE(?,auto_release_unknown),
+                   auto_retry_request_failures=COALESCE(?,auto_retry_request_failures)
+               WHERE id='default'""",
+            (
+                req.warning_per_group,
+                req.hard_limit_per_group,
+                None if req.auto_release_unknown is None else int(req.auto_release_unknown),
+                None if req.auto_retry_request_failures is None
+                else int(req.auto_retry_request_failures),
+            ),
+        )
+        after=dict(conn.execute(
+            f"SELECT {setting_columns} FROM workbench_settings WHERE id='default'"
+        ).fetchone())
         conn.execute("INSERT INTO audit_logs(id,action,actor_name,actor_role,detail) VALUES (?,'update_budget_settings',?,?,?)",(f'aud_{uuid.uuid4().hex}',user.user_id,user.role,json.dumps({'before':before,'after':after},ensure_ascii=False)))
     return {'message':'新任务默认额度已保存'}
 
@@ -186,3 +231,157 @@ def retry_planning(batch_id: str, user: UserContext = Depends(require_roles(['op
               AND design_id IN (SELECT id FROM designs WHERE status='draft')
         """,(batch_id,))
     return {'queued':cur.rowcount}
+
+
+def _technical_failure_eligibility(row) -> tuple[bool, Optional[str]]:
+    if row['task_status'] != 'failed' or row['failure_stage'] != 'request_charge_unknown':
+        return False, '该任务不是可重试的请求失败'
+    if row['design_status'] in ('archived', 'eliminated'):
+        return False, '设计已归档或淘汰'
+    if row['slot_current_version_id'] != row['slot_version_id']:
+        return False, '槽位已切换版本，旧重试已失效'
+    if row['raw_image_path'] or row['preview_image_path']:
+        return False, '本地已有图片记录，不能按未知结果重发'
+    stem = f"{row['design_code']}_{row['slot_type']}_v{row['version_num']}_{row['slot_version_id'][:8]}"
+    if (
+        (RAW_IMAGES_DIR / f"{stem}_raw.png").exists()
+        or (PREVIEW_IMAGES_DIR / f"{stem}_preview.jpg").exists()
+    ):
+        return False, '本地已有图片文件，不能按未知结果重发'
+    return True, None
+
+
+@router.get('/batches/{batch_id}/technical-failures')
+def technical_failures(
+    batch_id: str,
+    user: UserContext = Depends(require_roles(['operator', 'leader', 'admin'])),
+):
+    with get_db() as conn:
+        batch = conn.execute('SELECT id FROM batches WHERE id=?', (batch_id,)).fetchone()
+        if not batch:
+            raise HTTPException(404, '任务不存在')
+        rows = conn.execute(
+            """SELECT t.id AS task_id,t.batch_id,t.design_id,t.slot_id,t.slot_version_id,
+                      t.status AS task_status,t.failure_stage,t.last_error,t.auto_retry_count,
+                      t.retry_status,t.updated_at AS task_updated_at,
+                      s.slot_type,s.current_version_id AS slot_current_version_id,s.status AS slot_status,
+                      d.design_code,d.status AS design_status,
+                      sv.version_num,sv.raw_image_path,sv.preview_image_path,
+                      (SELECT COUNT(*) FROM image_generation_attempts a WHERE a.task_id=t.id)
+                          AS attempt_count
+               FROM tasks t
+               JOIN slots s ON s.id=t.slot_id
+               JOIN designs d ON d.id=t.design_id
+               JOIN slot_versions sv ON sv.id=t.slot_version_id
+               WHERE t.batch_id=? AND t.status='failed'
+                 AND t.failure_stage='request_charge_unknown'
+               ORDER BY t.updated_at ASC,t.id ASC""",
+            (batch_id,),
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        retryable, reason = _technical_failure_eligibility(row)
+        item['retryable'] = retryable
+        item['reason'] = reason
+        items.append(item)
+    return {'batch_id': batch_id, 'count': len(items), 'items': items}
+
+
+@router.post('/batches/{batch_id}/retry-technical-failures')
+def retry_technical_failures(
+    batch_id: str,
+    req: TechnicalRetryRequest,
+    user: UserContext = Depends(require_roles(['leader', 'admin'])),
+):
+    if not req.accept_unknown_charge:
+        raise HTTPException(400, '必须明确接受上游扣费未知的风险')
+    results = []
+    with get_db() as conn:
+        batch = conn.execute(
+            'SELECT status,is_circuit_broken FROM batches WHERE id=?', (batch_id,)
+        ).fetchone()
+    if not batch:
+        raise HTTPException(404, '任务不存在')
+    if batch['status'] != 'active' or batch['is_circuit_broken']:
+        raise HTTPException(409, '任务当前已暂停或熔断，请恢复后再重试')
+
+    for task_id in dict.fromkeys(req.task_ids):
+        try:
+            with get_db(immediate=True) as conn:
+                row = conn.execute(
+                    """SELECT t.id AS task_id,t.batch_id,t.design_id,t.slot_id,
+                              t.slot_version_id,t.status AS task_status,t.failure_stage,
+                              t.last_error,t.auto_retry_count,t.retry_status,
+                              s.slot_type,s.current_version_id AS slot_current_version_id,
+                              s.status AS slot_status,d.design_code,d.status AS design_status,
+                              sv.version_num,sv.raw_image_path,sv.preview_image_path
+                       FROM tasks t JOIN slots s ON s.id=t.slot_id
+                       JOIN designs d ON d.id=t.design_id
+                       JOIN slot_versions sv ON sv.id=t.slot_version_id
+                       WHERE t.id=? AND t.batch_id=?""",
+                    (task_id, batch_id),
+                ).fetchone()
+                if not row:
+                    raise ValueError('任务不存在或不属于当前批次')
+                retryable, reason = _technical_failure_eligibility(row)
+                if not retryable:
+                    raise ValueError(reason or '任务当前不可重试')
+                ledger_id = reserve_budget(
+                    conn,
+                    batch_id=batch_id,
+                    category='image_generation',
+                    amount=1,
+                    task_id=task_id,
+                    note=f"Manual confirmed technical retry for {row['design_code']} {row['slot_type']}",
+                )
+                conn.execute(
+                    """UPDATE tasks
+                       SET status='queued',failure_stage='request_retryable',
+                           retry_status='manual_retry_queued',auto_retry_count=0,
+                           retry_count=0,retry_after=datetime('now','localtime'),
+                           updated_at=datetime('now','localtime')
+                       WHERE id=?""",
+                    (task_id,),
+                )
+                conn.execute(
+                    """UPDATE slot_versions
+                       SET process_status='pending',is_unknown=0,
+                           error_message='人工确认上游扣费风险后重新尝试'
+                       WHERE id=?""",
+                    (row['slot_version_id'],),
+                )
+                conn.execute(
+                    """UPDATE slots SET status='generating',
+                       updated_at=datetime('now','localtime')
+                       WHERE id=? AND current_version_id=?""",
+                    (row['slot_id'], row['slot_version_id']),
+                )
+                conn.execute(
+                    """INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail)
+                       VALUES (?,?,'manual_retry_technical_failure',?,?,?)""",
+                    (
+                        f"aud_{uuid.uuid4().hex}",
+                        batch_id,
+                        user.user_id,
+                        user.role,
+                        json.dumps(
+                            {
+                                'task_id': task_id,
+                                'design_code': row['design_code'],
+                                'slot_type': row['slot_type'],
+                                'previous_error': row['last_error'],
+                                'ledger_id': ledger_id,
+                                'risk_accepted': True,
+                                'upstream_charge': 'unknown',
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+            results.append({'task_id': task_id, 'ok': True, 'stage': 'queued'})
+        except (ValueError, BudgetWarningExceededError, BudgetHardLimitExceededError) as exc:
+            results.append({'task_id': task_id, 'ok': False, 'error': _error(exc)})
+        except Exception as exc:
+            results.append({'task_id': task_id, 'ok': False, 'error': _error(exc)})
+    return {'results': results}

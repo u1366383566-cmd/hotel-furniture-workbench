@@ -25,7 +25,7 @@ def test_preview_revalidates_after_authorization(client, monkeypatch):
     design = client.get(f"/api/designs/batch/{response.json()['id']}").json()[0]
     url = f"/api/media/preview/{design['slots']['panorama']['current_version_id']}"
     first = client.get(url)
-    assert first.status_code == 200 and first.headers['cache-control'] == 'private, no-cache'
+    assert first.status_code == 200 and first.headers['cache-control'] == 'private, max-age=604800, immutable'
     assert 'content-encoding' not in first.headers
     cached = client.get(url, headers={'If-None-Match': first.headers['etag']})
     assert cached.status_code == 304 and not cached.content

@@ -45,6 +45,7 @@ def _ensure_columns(conn: sqlite3.Connection):
 
     add_col_if_missing('batches', 'pause_reason', 'TEXT')
     add_col_if_missing('workbench_settings', 'auto_release_unknown', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('workbench_settings', 'auto_retry_request_failures', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'trial_run_remaining', 'INTEGER DEFAULT 0')
     add_col_if_missing('batches', 'trial_mode', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'trial_epoch', 'INTEGER NOT NULL DEFAULT 0')
@@ -63,7 +64,10 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('tasks', 'retry_after', 'TEXT')
     add_col_if_missing('tasks', 'trial_epoch', 'INTEGER')
     add_col_if_missing('tasks', 'failure_stage', 'TEXT')
+    add_col_if_missing('tasks', 'auto_retry_count', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('tasks', 'retry_status', 'TEXT')
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_design_version ON tasks(design_id,slot_version_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_retry_queue ON tasks(status,retry_after,auto_retry_count)")
     add_col_if_missing('watermark_configs', 'renderer', "TEXT NOT NULL DEFAULT 'seezo_logo'")
     add_col_if_missing('watermark_configs', 'logo_asset', "TEXT NOT NULL DEFAULT 'static/seezo-watermark.png'")
     add_col_if_missing('watermark_configs', 'logo_width_ratio', 'REAL NOT NULL DEFAULT 0.20')
@@ -102,6 +106,24 @@ def _ensure_columns(conn: sqlite3.Connection):
         attempt INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
         finished_at TEXT, status TEXT, error TEXT, PRIMARY KEY(job_id,attempt))
     """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS image_generation_attempts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        slot_version_id TEXT NOT NULL REFERENCES slot_versions(id) ON DELETE CASCADE,
+        attempt_no INTEGER NOT NULL,
+        started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        finished_at TEXT,
+        outcome TEXT NOT NULL DEFAULT 'running',
+        error_type TEXT,
+        error_message TEXT,
+        next_retry_at TEXT,
+        ledger_id TEXT,
+        upstream_request_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(task_id,attempt_no))
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_image_attempt_task ON image_generation_attempts(task_id,attempt_no)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_image_attempt_version ON image_generation_attempts(slot_version_id)")
     conn.execute("CREATE TABLE IF NOT EXISTS nas_upload_settings (id INTEGER PRIMARY KEY CHECK(id=1), auto_enabled INTEGER NOT NULL DEFAULT 0, test_design_id TEXT)")
     conn.execute("INSERT OR IGNORE INTO nas_upload_settings(id,auto_enabled) VALUES (1,0)")
     # Only audited risk releases are backfilled; other legacy failures remain

@@ -89,6 +89,10 @@ class SlotVersionDetail(BaseModel):
     depends_on_panorama_version_id: Optional[str] = None
     error_message: Optional[str] = None
     is_unknown: bool
+    auto_retry_count: int = 0
+    retry_status: Optional[str] = None
+    next_retry_at: Optional[str] = None
+    generation_attempts: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str
 
 class SlotDetail(BaseModel):

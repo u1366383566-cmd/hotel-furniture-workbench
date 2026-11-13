@@ -27,12 +27,13 @@ def get_preview_image(
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="预览图文件不存在")
 
+        cache_control = "private, max-age=604800, immutable"
         response = FileResponse(path=file_path, media_type="image/jpeg", stat_result=file_path.stat(),
-                                headers={"Cache-Control": "private, no-cache"})
+                                headers={"Cache-Control": cache_control})
         etag = response.headers['etag']
         candidates = [value.strip().removeprefix('W/') for value in request.headers.get('if-none-match', '').split(',')]
         if etag in candidates or '*' in candidates:
-            return Response(status_code=304, headers={'ETag': etag, 'Cache-Control': 'private, no-cache'})
+            return Response(status_code=304, headers={'ETag': etag, 'Cache-Control': cache_control})
         return response
 
 @router.get("/raw/{version_id}")

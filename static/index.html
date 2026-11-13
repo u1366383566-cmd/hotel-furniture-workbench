@@ -154,6 +154,22 @@
       </div>
     </nav>
 
+    <section id="technical-failures-panel" class="wb-card technical-failures-panel hidden" aria-labelledby="technical-failures-title">
+      <div class="technical-failures-heading">
+        <div>
+          <h3 id="technical-failures-title">技术失败待确认 <span id="technical-failures-count" class="wb-badge wb-badge-rose">0</span></h3>
+          <p>请求超时、5xx 或 429 自动重试耗尽后，系统保留原任务和版本。确认上游扣费风险后，可沿用原提示词与视角重新开放两次自动重试。</p>
+        </div>
+        <button id="technical-failures-refresh" class="wb-btn wb-btn-ghost" type="button">刷新</button>
+      </div>
+      <div id="technical-failures-list" class="technical-failures-list"></div>
+      <div id="technical-failures-actions" class="technical-failures-actions hidden">
+        <label><input id="technical-failures-select-all" type="checkbox"> 全选可重试项</label>
+        <label><input id="technical-failures-accept-risk" type="checkbox"> 我确认上游是否扣费未知，接受再次计费风险</label>
+        <button id="technical-failures-retry" class="wb-btn wb-btn-amber" type="button">重试所选失败项</button>
+      </div>
+    </section>
+
     <div id="bulk-results" class="workbench-notice hidden" role="status"></div>
     <!-- 选项卡内容区 -->
     <div id="tab-content">
@@ -303,7 +319,7 @@
       <!-- 5. 未知保护与系统设置 -->
       <div id="tab-panel-system" class="space-y-5 hidden">
         <div class="section-intro"><div><p class="eyebrow">ADMIN / CONTROL</p><h2>管理中心</h2><p>额度、模型、系列规则与异常任务的集中控制台。</p></div></div>
-        <div class="wb-card p-5"><h3 class="text-sm font-bold">任务额度与用量</h3><div id="admin-budget-panel"></div><div class="settings-inline"><label for="budget-per-warning">每组预警次数 <input id="budget-per-warning" class="wb-input" type="number" min="1" value="8"></label><label for="budget-per-hard">每组硬上限 <input id="budget-per-hard" class="wb-input" type="number" min="2" value="10"></label><label><input id="auto-release-unknown" type="checkbox"> 请求超时或上游 5xx 自动按失败放行</label><button id="budget-settings-save" class="wb-btn wb-btn-dark">保存默认额度</button></div><p>开启后上游是否扣费仍未知，实际消耗可能未计入工作台，重做可能再次计费。</p><details><summary>风险放行记录（<span id="risk-release-count">0</span>）</summary><div id="risk-release-list"></div></details></div>
+        <div class="wb-card p-5"><h3 class="text-sm font-bold">任务额度与用量</h3><div id="admin-budget-panel"></div><div class="settings-inline"><label for="budget-per-warning">每组预警次数 <input id="budget-per-warning" class="wb-input" type="number" min="1" value="8"></label><label for="budget-per-hard">每组硬上限 <input id="budget-per-hard" class="wb-input" type="number" min="2" value="10"></label><label><input id="auto-release-unknown" type="checkbox"> 请求失败按已接受风险释放额度</label><label><input id="auto-retry-request-failures" type="checkbox"> 请求超时、5xx、429 自动重试两次</label><button id="budget-settings-save" class="wb-btn wb-btn-dark">保存默认额度</button></div><p>自动重试每次都会重新占用生图额度。上游是否扣费仍可能未知，实际消耗可能未计入工作台，重试可能再次计费。</p><details><summary>风险放行记录（<span id="risk-release-count">0</span>）</summary><div id="risk-release-list"></div></details></div>
 
         <div class="wb-card p-5 space-y-3">
           <div><h3 class="text-sm font-bold text-inkTitle">文本规划模型 （管理员 / 负责人兼容）</h3>
@@ -379,7 +395,7 @@
                 <span class="w-2 h-2 rounded-full bg-violet-500"></span>
                 结果未知 (unknown_pending_confirmation) 处置中心
               </h3>
-              <p class="text-xs text-inkMuted mt-0.5">发生超时或断网的任务保守计入预算，禁止自动重发；由负责人核查后确认成功或释放额度。</p>
+              <p class="text-xs text-inkMuted mt-0.5">仅展示仍处于结果未知、需要人工核账的任务。请求超时、5xx 和 429 会先按配置自动重试，耗尽后进入技术失败待确认区。</p>
             </div>
             <button id="btn-refresh-unknown" class="text-xs text-primary-600 hover:text-primary-700 hover:underline shrink-0">刷新未知列表</button>
           </div>

@@ -144,7 +144,9 @@ def test_admin_settings_control_new_task_budget_and_preserve_legacy_put(client):
     payload={'warning_per_group':8,'hard_limit_per_group':10,'auto_release_unknown':True}
     assert client.put(url,json=payload,headers={'X-User-Role':'operator'}).status_code==403
     assert client.put(url,json=payload,headers={'X-User-Role':'admin'}).status_code==200
-    assert client.get(url,headers={'X-User-Role':'admin'}).json()==payload
+    assert client.get(url,headers={'X-User-Role':'admin'}).json()=={
+        **payload,'auto_retry_request_failures':False
+    }
     assert client.put(url,json={'warning_per_group':8,'hard_limit_per_group':10},headers={'X-User-Role':'admin'}).status_code==200
     assert client.get(url,headers={'X-User-Role':'admin'}).json()['auto_release_unknown'] is True
     response=client.post('/api/batches',headers={'X-User-Role':'leader'},json={'name':'automatic budget','enabled_series':['modern_business'],'target_archived_count':2,'auto_workflow':True,'smart_planning':True,'auto_start_panorama':False,'series_counts':{'modern_business':{'primary':2,'standby':0}}})

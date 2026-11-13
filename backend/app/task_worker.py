@@ -16,7 +16,8 @@ from .config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
 from .watermark_service import save_mock_slot_image, save_real_slot_image, PreviewRecoveryError
 from .planning_service import build_real_generation_prompt
 from .budget_service import (
-    settle_budget_success, release_budget_failed, hold_budget_unknown
+    reserve_budget, settle_budget_success, release_budget_failed, hold_budget_unknown,
+    BudgetWarningExceededError, BudgetHardLimitExceededError,
 )
 from .image_adapter import (
     ExplicitRateLimitError, ImageApiMisconfigError,
@@ -50,6 +51,271 @@ def _rate_limit_delay(error, retry_count):
             except (TypeError, ValueError, OverflowError):
                 pass
     return (15, 30, 60)[min(retry_count, 2)] + random.randint(0, 3)
+
+
+def _request_retry_delay(error, retry_index: int) -> int:
+    """Return the bounded delay for a request-stage automatic retry."""
+    if isinstance(error, ExplicitRateLimitError) and getattr(error, "retry_after", None):
+        value = str(error.retry_after)
+        try:
+            return max(15, min(300, int(value)))
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = int((when - datetime.now(timezone.utc)).total_seconds())
+                return max(15, min(300, seconds))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 30 if retry_index == 0 else 90
+
+
+def _finish_generation_attempt(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: str,
+    *,
+    error: Optional[BaseException] = None,
+    next_retry_at: Optional[str] = None,
+    upstream_request_id: Optional[str] = None,
+) -> None:
+    """Finish the newest running attempt without creating user-visible versions."""
+    row = conn.execute(
+        """SELECT id FROM image_generation_attempts
+           WHERE task_id=? AND outcome='running'
+           ORDER BY attempt_no DESC LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return
+    conn.execute(
+        """UPDATE image_generation_attempts
+           SET finished_at=datetime('now','localtime'), outcome=?, error_type=?,
+               error_message=?, next_retry_at=?, upstream_request_id=COALESCE(?, upstream_request_id)
+           WHERE id=?""",
+        (
+            outcome,
+            type(error).__name__ if error else None,
+            str(error)[:1000] if error else None,
+            next_retry_at,
+            upstream_request_id,
+            row["id"],
+        ),
+    )
+
+
+def _schedule_or_finalize_request_retry(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    batch_id: str,
+    slot_id: str,
+    slot_version_id: str,
+    design_code: str,
+    slot_type: str,
+    error: BaseException,
+    ledger_id: Optional[str],
+    raw_generated: bool,
+    raw_name: Optional[str],
+    preview_name: Optional[str],
+    version_num: int,
+    treat_as_429: bool = False,
+) -> str:
+    """Schedule a bounded request retry or finalize the unknown-charge failure.
+
+    Returns ``retry_queued``, ``retry_exhausted``, ``budget_blocked`` or
+    ``not_eligible``.  No batch auto-resume happens here; paused/circuit-broken
+    batches remain paused.
+    """
+    settings = conn.execute(
+        """SELECT auto_release_unknown,auto_retry_request_failures
+           FROM workbench_settings WHERE id='default'"""
+    ).fetchone()
+    current = conn.execute(
+        """SELECT t.status,t.auto_retry_count,sv.raw_image_path,sv.preview_image_path,
+                  s.current_version_id,d.status AS design_status,d.archived_at
+           FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id
+           JOIN slots s ON s.id=t.slot_id JOIN designs d ON d.id=t.design_id
+           WHERE t.id=?""",
+        (task_id,),
+    ).fetchone()
+    ledger = conn.execute(
+        """SELECT id,status,delta_reserved FROM budget_ledger
+           WHERE id=? AND batch_id=? AND reference_task_id=? AND category='image_generation'""",
+        (ledger_id, batch_id, task_id),
+    ).fetchone() if ledger_id else None
+    stem = f"{design_code}_{slot_type}_v{version_num}_{slot_version_id[:8]}"
+    has_file = (
+        (RAW_IMAGES_DIR / (stem + "_raw.png")).exists()
+        or (PREVIEW_IMAGES_DIR / (stem + "_preview.jpg")).exists()
+    )
+    eligible = bool(
+        settings
+        and settings["auto_release_unknown"]
+        and settings["auto_retry_request_failures"]
+        and current
+        and current["status"] == "running"
+        and current["current_version_id"] == slot_version_id
+        and current["design_status"] not in ("archived", "eliminated")
+        and not raw_generated
+        and not raw_name
+        and not preview_name
+        and not has_file
+        and not current["raw_image_path"]
+        and not current["preview_image_path"]
+        and ledger
+        and ledger["status"] == "reserved"
+    )
+    if not eligible:
+        return "not_eligible"
+
+    retry_index = int(current["auto_retry_count"] or 0)
+    if retry_index < 2:
+        delay = _request_retry_delay(error, retry_index)
+        retry_after = f"+{delay} seconds"
+        _finish_generation_attempt(
+            conn, task_id, "retryable_failure", error=error, next_retry_at=retry_after
+        )
+        release_budget_failed(
+            conn,
+            batch_id,
+            ledger_id,
+            reason="请求结果未知，按已接受风险释放后自动重试",
+        )
+        try:
+            next_ledger_id = reserve_budget(
+                conn,
+                batch_id=batch_id,
+                category="image_generation",
+                amount=1,
+                task_id=task_id,
+                note=f"Automatic retry {retry_index + 1}/2 for {design_code} {slot_type}",
+            )
+        except (BudgetWarningExceededError, BudgetHardLimitExceededError) as budget_error:
+            conn.execute(
+                """UPDATE tasks SET status='failed',failure_stage='request_charge_unknown',
+                   retry_status='budget_blocked',retry_after=NULL,last_error=?,
+                   updated_at=datetime('now','localtime') WHERE id=?""",
+                (str(error), task_id),
+            )
+            conn.execute(
+                """UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message=?
+                   WHERE id=?""",
+                (f"自动重试等待额度：{budget_error}", slot_version_id),
+            )
+            conn.execute(
+                """UPDATE slots SET status='empty',updated_at=datetime('now','localtime')
+                   WHERE id=? AND current_version_id=?""",
+                (slot_id, slot_version_id),
+            )
+            conn.execute(
+                """INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail)
+                   VALUES (?,?,'auto_retry_budget_blocked','system','system',?)""",
+                (
+                    f"aud_{uuid.uuid4().hex}",
+                    batch_id,
+                    json.dumps(
+                        {
+                            "task_id": task_id,
+                            "design_code": design_code,
+                            "slot_type": slot_type,
+                            "reason": str(budget_error),
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            return "budget_blocked"
+
+        conn.execute(
+            """UPDATE tasks SET status='queued',failure_stage='request_retryable',
+               retry_status='auto_retry_pending',auto_retry_count=auto_retry_count+1,
+               retry_after=datetime('now','localtime',?),last_error=?,
+               updated_at=datetime('now','localtime') WHERE id=?""",
+            (retry_after, str(error), task_id),
+        )
+        conn.execute(
+            """UPDATE slot_versions SET process_status='pending',is_unknown=0,error_message=?
+               WHERE id=?""",
+            (f"自动重试 {retry_index + 1}/2：{error}", slot_version_id),
+        )
+        conn.execute(
+            """UPDATE slots SET status='generating',updated_at=datetime('now','localtime')
+               WHERE id=? AND current_version_id=?""",
+            (slot_id, slot_version_id),
+        )
+        conn.execute(
+            """INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail)
+               VALUES (?,?,'auto_schedule_image_retry','system','system',?)""",
+            (
+                f"aud_{uuid.uuid4().hex}",
+                batch_id,
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "design_code": design_code,
+                        "slot_type": slot_type,
+                        "error_type": "ExplicitRateLimitError" if treat_as_429 else type(error).__name__,
+                        "error": str(error),
+                        "retry_index": retry_index + 1,
+                        "delay_seconds": delay,
+                        "previous_ledger_id": ledger_id,
+                        "next_ledger_id": next_ledger_id,
+                        "upstream_charge": "unknown",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return "retry_queued"
+
+    _finish_generation_attempt(conn, task_id, "retry_exhausted", error=error)
+    conn.execute(
+        """UPDATE tasks SET status='failed',failure_stage='request_charge_unknown',
+           retry_status='retry_exhausted',retry_after=NULL,last_error=?,
+           updated_at=datetime('now','localtime') WHERE id=?""",
+        (str(error), task_id),
+    )
+    conn.execute(
+        """UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message=?
+           WHERE id=?""",
+        (f"自动重试 2 次仍失败：{error}", slot_version_id),
+    )
+    conn.execute(
+        """UPDATE slots SET status='empty',updated_at=datetime('now','localtime')
+           WHERE id=? AND current_version_id=?""",
+        (slot_id, slot_version_id),
+    )
+    release_budget_failed(
+        conn,
+        batch_id,
+        ledger_id,
+        reason="自动重试耗尽，上游扣费未知",
+    )
+    conn.execute(
+        """INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail)
+           VALUES (?,?,'auto_retry_exhausted','system','system',?)""",
+        (
+            f"aud_{uuid.uuid4().hex}",
+            batch_id,
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "design_code": design_code,
+                    "slot_type": slot_type,
+                    "error_type": "ExplicitRateLimitError" if treat_as_429 else type(error).__name__,
+                    "error": str(error),
+                    "retry_count": 2,
+                    "ledger_id": ledger_id,
+                    "upstream_charge": "unknown",
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    return "retry_exhausted"
+
 
 class TaskWorker:
     def __init__(self):
@@ -132,7 +398,12 @@ class TaskWorker:
                 ledger_id = bl_rows[0]["id"] if len(bl_rows) == 1 else None
 
                 if has_valid_disk_file:
-                    conn.execute("UPDATE tasks SET status = 'completed', updated_at = datetime('now', 'localtime') WHERE id = ?", (tid,))
+                    _finish_generation_attempt(conn, tid, "success")
+                    conn.execute(
+                        """UPDATE tasks SET status='completed',failure_stage=NULL,retry_status=NULL,
+                           retry_after=NULL,updated_at=datetime('now','localtime') WHERE id=?""",
+                        (tid,),
+                    )
                     conn.execute("UPDATE slot_versions SET process_status = 'completed', is_unknown = 0 WHERE id = ?", (vid,))
                     if ledger_id:
                         settle_budget_success(conn, bid, ledger_id, tid)
@@ -155,6 +426,7 @@ class TaskWorker:
                                     WHERE id=? AND status IN ('downstream_generating','panorama_approved')""", (did,))
                     logger.info(f"Recovered task {tid} as completed from valid disk file.")
                 else:
+                    _finish_generation_attempt(conn, tid, "unknown")
                     conn.execute("UPDATE tasks SET status = 'unknown', last_error = 'Interrupted by restart, unverified upstream state', updated_at = datetime('now', 'localtime') WHERE id = ?", (tid,))
                     conn.execute("UPDATE slot_versions SET process_status = 'unknown_pending_confirmation', is_unknown = 1, error_message = 'Interrupted by restart' WHERE id = ?", (vid,))
                     if ledger_id:
@@ -234,12 +506,17 @@ class TaskWorker:
                     AND status='reserved'""", (old['id'],)).fetchall()
                 if len(ledgers) != 1:
                     continue
-                conn.execute("UPDATE tasks SET status='cancelled',last_error='任务版本已失效' WHERE id=?", (old['id'],))
+                conn.execute(
+                    """UPDATE tasks SET status='cancelled',retry_status='stale_cancelled',
+                       last_error='任务版本已失效' WHERE id=?""",
+                    (old['id'],),
+                )
                 conn.execute("UPDATE slot_versions SET process_status='cancelled' WHERE id=? AND process_status IN ('pending','blocked')", (old['slot_version_id'],))
                 release_budget_failed(conn, old['batch_id'], ledgers[0]['id'], reason='任务未发送且版本已失效')
             cur = conn.cursor()
             cur.execute("""
                 SELECT t.id, t.batch_id, t.design_id, t.slot_id, t.slot_version_id, t.task_type, t.retry_count,
+                       t.auto_retry_count, t.retry_status,
                        d.series_id, d.design_code, d.structured_spec, d.status as design_status,
                        d.template_version as design_tpl_ver,
                        s.slot_type, s.current_version_id as slot_current_vid,
@@ -305,6 +582,31 @@ class TaskWorker:
             """, (task_row["batch_id"],))
             conn.execute("UPDATE tasks SET status = 'running',trial_epoch=?, updated_at = datetime('now', 'localtime') WHERE id = ?", (trial['trial_epoch'] if trial['trial_mode'] else None, task_id))
             conn.execute("UPDATE slot_versions SET process_status = 'processing' WHERE id = ?", (task_row["slot_version_id"],))
+            ledger = conn.execute(
+                """SELECT id FROM budget_ledger
+                   WHERE reference_task_id=? AND category='image_generation'
+                     AND status IN ('reserved','unknown_held')
+                     AND (ledger_event_type='generation_request' OR ledger_event_type IS NULL)
+                   ORDER BY created_at DESC LIMIT 1""",
+                (task_id,),
+            ).fetchone()
+            next_attempt = conn.execute(
+                """SELECT COALESCE(MAX(attempt_no),0)+1 AS n
+                   FROM image_generation_attempts WHERE task_id=?""",
+                (task_id,),
+            ).fetchone()["n"]
+            conn.execute(
+                """INSERT INTO image_generation_attempts(
+                       id,task_id,slot_version_id,attempt_no,outcome,ledger_id
+                   ) VALUES (?,?,?,?, 'running', ?)""",
+                (
+                    f"att_{uuid.uuid4().hex[:12]}",
+                    task_id,
+                    task_row["slot_version_id"],
+                    next_attempt,
+                    ledger["id"] if ledger else None,
+                ),
+            )
 
         self._execute_single_task(task_row)
         return True
@@ -429,12 +731,23 @@ class TaskWorker:
                 cur.execute("SELECT status FROM designs WHERE id = ?", (design_id,))
                 d_curr = cur.fetchone()
                 if not d_curr:
+                    _finish_generation_attempt(
+                        conn, task_id, "success", upstream_request_id=upstream_request_id
+                    )
                     return
 
                 design_curr_status = d_curr["status"]
+                _finish_generation_attempt(
+                    conn, task_id, "success", upstream_request_id=upstream_request_id
+                )
                 # 1. 检查设计终态：若已被人工淘汰或已归档，任务成果作废，绝不修改槽位与设计状态！
                 if design_curr_status in ("eliminated", "archived"):
-                    conn.execute("UPDATE tasks SET status = 'completed', last_error = 'Discarded: design already finalized/eliminated', updated_at = datetime('now', 'localtime') WHERE id = ?", (task_id,))
+                    conn.execute(
+                        """UPDATE tasks SET status='completed',failure_stage=NULL,retry_status=NULL,
+                           retry_after=NULL,last_error='Discarded: design already finalized/eliminated',
+                           updated_at=datetime('now','localtime') WHERE id=?""",
+                        (task_id,),
+                    )
                     conn.execute("UPDATE slot_versions SET process_status = 'completed', raw_image_path = ?, preview_image_path = ? WHERE id = ?", (raw_name, preview_name, slot_version_id))
                     if ledger_id:
                         settle_budget_success(conn, batch_id, ledger_id, task_id)
@@ -480,8 +793,8 @@ class TaskWorker:
                     """, (raw_name, preview_name, upstream_request_id,
                           0 if image_api_cfg["enabled"] else 1, slot_version_id))
                     conn.execute("""
-                        UPDATE tasks SET status = 'completed',
-                            last_error = 'Discarded: downstream dependency replaced',
+                        UPDATE tasks SET status = 'completed',failure_stage=NULL,retry_status=NULL,
+                            retry_after=NULL,last_error = 'Discarded: downstream dependency replaced',
                             updated_at = datetime('now', 'localtime') WHERE id = ?
                     """, (task_id,))
                     if ledger_id:
@@ -512,7 +825,11 @@ class TaskWorker:
                     conn.execute("UPDATE slot_versions SET prompt_metadata = ? WHERE id = ?",
                                  (json.dumps(meta, ensure_ascii=False), slot_version_id))
 
-                conn.execute("UPDATE tasks SET status = 'completed', updated_at = datetime('now', 'localtime') WHERE id = ?", (task_id,))
+                conn.execute(
+                    """UPDATE tasks SET status='completed',failure_stage=NULL,retry_status=NULL,
+                       retry_after=NULL,updated_at=datetime('now','localtime') WHERE id=?""",
+                    (task_id,),
+                )
 
                 if not is_stale_task:
                     conn.execute("""
@@ -558,6 +875,9 @@ class TaskWorker:
 
         except ReferenceUnavailableError as ref_error:
             with get_db(immediate=True) as conn:
+                _finish_generation_attempt(
+                    conn, task_id, "blocked", error=ref_error
+                )
                 conn.execute("""UPDATE tasks SET status='blocked',failure_stage='reference',
                     last_error=?,updated_at=datetime('now','localtime') WHERE id=?""",
                     (str(ref_error), task_id))
@@ -568,6 +888,7 @@ class TaskWorker:
             # 明确拒绝 (401/403)：确认无扣费，释放预占预算，熔断批次
             logger.error(f"Task {task_id} Auth Failure: {pe}")
             with get_db(immediate=True) as conn:
+                _finish_generation_attempt(conn, task_id, "failed", error=pe)
                 conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(pe), task_id))
                 conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (str(pe), slot_version_id))
                 conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -583,9 +904,40 @@ class TaskWorker:
 
         except ExplicitRateLimitError as rle:
             # 显式 429 速率限制：技术重试（与人工重做严格分离，不消耗人工限额）
-            logger.warning(f"Task {task_id} Explicit Rate Limited (429): retry {retry_count}/3")
+            logger.warning(f"Task {task_id} Explicit Rate Limited (429): auto_retry={task_row['auto_retry_count']}/2")
             with get_db(immediate=True) as conn:
+                outcome = _schedule_or_finalize_request_retry(
+                    conn,
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    slot_id=slot_id,
+                    slot_version_id=slot_version_id,
+                    design_code=design_code,
+                    slot_type=slot_type,
+                    error=rle,
+                    ledger_id=ledger_id,
+                    raw_generated=raw_generated,
+                    raw_name=raw_name,
+                    preview_name=preview_name,
+                    version_num=version_num,
+                    treat_as_429=True,
+                )
+                if outcome != "not_eligible":
+                    conn.execute(
+                        "UPDATE slots SET technical_retry_count=technical_retry_count+1 WHERE id=?",
+                        (slot_id,),
+                    )
+                    conn.execute(
+                        """INSERT INTO budget_ledger(
+                               id,batch_id,category,delta_reserved,delta_used,delta_unsettled,
+                               status,ledger_event_type,reference_task_id,note
+                           ) VALUES (?,?,'image_generation',0,0,1,'released',
+                                     'technical_retry',?,'Automatic 429 request retry')""",
+                        (f"bgt_retry_{uuid.uuid4().hex[:8]}", batch_id, task_id),
+                    )
+                    return
                 if image_api_cfg['enabled'] and os.environ.get('WORKBENCH_429_CONFIRMED_UNACCEPTED') != '1':
+                    _finish_generation_attempt(conn, task_id, "unknown", error=rle)
                     conn.execute("UPDATE tasks SET status='unknown',last_error='429受理状态未核实',updated_at=datetime('now','localtime') WHERE id=?", (task_id,))
                     conn.execute("UPDATE slot_versions SET process_status='unknown_pending_confirmation',is_unknown=1,error_message='429受理状态未核实' WHERE id=?", (slot_version_id,))
                     if ledger_id:
@@ -603,9 +955,17 @@ class TaskWorker:
 
                 if retry_count < 3:
                     delay = _rate_limit_delay(rle, retry_count)
+                    _finish_generation_attempt(
+                        conn,
+                        task_id,
+                        "retryable_failure",
+                        error=rle,
+                        next_retry_at=f"+{delay} seconds",
+                    )
                     conn.execute("UPDATE tasks SET status = 'queued', retry_count = retry_count + 1, retry_after=datetime('now','localtime',?), last_error = ? WHERE id = ?", (f'+{delay} seconds', str(rle), task_id))
                     conn.execute("UPDATE slot_versions SET process_status = 'pending', error_message = ? WHERE id = ?", (f"Retrying: {str(rle)}", slot_version_id))
                 else:
+                    _finish_generation_attempt(conn, task_id, "failed", error=rle)
                     conn.execute("UPDATE tasks SET status = 'failed', last_error = 'Rate limit retry limit exceeded' WHERE id = ?", (task_id,))
                     conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = 'Max technical retries reached' WHERE id = ?", (slot_version_id,))
                     conn.execute("UPDATE slots SET status = 'empty' WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -623,13 +983,74 @@ class TaskWorker:
             # 网络超时或真实连接重置：状态未知，保守计入预算持有，暂停批次防雪崩
             logger.error(f"Task {task_id} Timeout or Connection Reset (Unknown): {unk_err}")
             with get_db(immediate=True) as conn:
-                setting = conn.execute("SELECT auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone()
-                current = conn.execute("SELECT t.status,sv.raw_image_path,sv.preview_image_path,s.current_version_id,d.status AS design_status FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id JOIN slots s ON s.id=t.slot_id JOIN designs d ON d.id=t.design_id WHERE t.id=?", (task_id,)).fetchone()
-                ledger = conn.execute("SELECT id,status,delta_reserved FROM budget_ledger WHERE id=? AND batch_id=? AND reference_task_id=? AND category='image_generation'", (ledger_id,batch_id,task_id)).fetchone() if ledger_id else None
+                result_failure = isinstance(unk_err, (ImageResultDownloadError, PreviewRecoveryError)) and not (
+                    isinstance(unk_err, PreviewRecoveryError) and unk_err.storage_error)
+                request_retryable = isinstance(
+                    unk_err, (ImageRequestTimeout, ImageRequestServerError)
+                ) or type(unk_err) is ConnectionResetError
+                if request_retryable:
+                    outcome = _schedule_or_finalize_request_retry(
+                        conn,
+                        task_id=task_id,
+                        batch_id=batch_id,
+                        slot_id=slot_id,
+                        slot_version_id=slot_version_id,
+                        design_code=design_code,
+                        slot_type=slot_type,
+                        error=unk_err,
+                        ledger_id=ledger_id,
+                        raw_generated=raw_generated,
+                        raw_name=raw_name,
+                        preview_name=preview_name,
+                        version_num=version_num,
+                    )
+                    if outcome != "not_eligible":
+                        return
+
+                setting = conn.execute(
+                    "SELECT auto_release_unknown FROM workbench_settings WHERE id='default'"
+                ).fetchone()
+                current = conn.execute(
+                    """SELECT t.status,sv.raw_image_path,sv.preview_image_path,
+                              s.current_version_id,d.status AS design_status
+                       FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id
+                       JOIN slots s ON s.id=t.slot_id JOIN designs d ON d.id=t.design_id
+                       WHERE t.id=?""",
+                    (task_id,),
+                ).fetchone()
+                ledger = conn.execute(
+                    """SELECT id,status,delta_reserved FROM budget_ledger
+                       WHERE id=? AND batch_id=? AND reference_task_id=?
+                         AND category='image_generation'""",
+                    (ledger_id, batch_id, task_id),
+                ).fetchone() if ledger_id else None
                 stem = f"{design_code}_{slot_type}_v{version_num}_{slot_version_id[:8]}"
-                has_file = (RAW_IMAGES_DIR / (stem+'_raw.png')).exists() or (PREVIEW_IMAGES_DIR / (stem+'_preview.jpg')).exists()
-                auto = bool(setting and setting['auto_release_unknown'] and isinstance(unk_err,(ImageRequestTimeout,ImageRequestServerError)) and not raw_generated and not raw_name and not preview_name and not has_file and current and current['status']=='running' and not current['raw_image_path'] and not current['preview_image_path'] and current['design_status'] not in ('archived','eliminated') and ledger and ledger['status']=='reserved')
+                has_file = (
+                    (RAW_IMAGES_DIR / (stem + "_raw.png")).exists()
+                    or (PREVIEW_IMAGES_DIR / (stem + "_preview.jpg")).exists()
+                )
+                auto = bool(
+                    setting
+                    and setting["auto_release_unknown"]
+                    and isinstance(
+                        unk_err, (ImageRequestTimeout, ImageRequestServerError)
+                    )
+                    and not raw_generated
+                    and not raw_name
+                    and not preview_name
+                    and not has_file
+                    and current
+                    and current["status"] == "running"
+                    and not current["raw_image_path"]
+                    and not current["preview_image_path"]
+                    and current["design_status"] not in ("archived", "eliminated")
+                    and ledger
+                    and ledger["status"] == "reserved"
+                )
                 if auto:
+                    _finish_generation_attempt(
+                        conn, task_id, "retry_exhausted", error=unk_err
+                    )
                     conn.execute("UPDATE tasks SET status='failed',failure_stage='request_charge_unknown',last_error=?,updated_at=datetime('now','localtime') WHERE id=?", (str(unk_err),task_id))
                     conn.execute("UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message=? WHERE id=?", (str(unk_err),slot_version_id))
                     if current['current_version_id']==slot_version_id:
@@ -637,8 +1058,12 @@ class TaskWorker:
                     release_budget_failed(conn,batch_id,ledger_id,reason='上游扣费未知，按已接受风险自动释放')
                     conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'auto_release_unknown','system','system',?)",(f'aud_{uuid.uuid4().hex}',batch_id,json.dumps({'task_id':task_id,'design_code':design_code,'error_type':type(unk_err).__name__,'error':str(unk_err),'ledger_id':ledger_id,'reserved_released':ledger['delta_reserved'],'upstream_charge':'unknown'},ensure_ascii=False)))
                     return
-                result_failure = isinstance(unk_err, (ImageResultDownloadError, PreviewRecoveryError)) and not (
-                    isinstance(unk_err, PreviewRecoveryError) and unk_err.storage_error)
+                _finish_generation_attempt(
+                    conn,
+                    task_id,
+                    "result_download_unknown" if result_failure else "unknown",
+                    error=unk_err,
+                )
                 if isinstance(unk_err, PreviewRecoveryError):
                     conn.execute("UPDATE slot_versions SET raw_image_path=? WHERE id=?",
                                  (unk_err.raw_filename, slot_version_id))
@@ -666,6 +1091,7 @@ class TaskWorker:
             # 磁盘故障：记录错误并熔断批次
             logger.critical(f"Task {task_id} Disk Full/OS Error: {ose}")
             with get_db(immediate=True) as conn:
+                _finish_generation_attempt(conn, task_id, "failed", error=ose)
                 conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(ose), task_id))
                 conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (str(ose), slot_version_id))
                 conn.execute("UPDATE slots SET status = 'empty' WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -683,6 +1109,7 @@ class TaskWorker:
             if raw_generated:
                 logger.error(f"Task {task_id} Watermark failed but raw image generated: {e}")
                 with get_db(immediate=True) as conn:
+                    _finish_generation_attempt(conn, task_id, "postprocess_failed", error=e)
                     conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(e), task_id))
                     conn.execute("UPDATE slot_versions SET process_status = 'failed', raw_image_path = ?, error_message = ? WHERE id = ?", (raw_name, f"Post-processing failed: {str(e)}", slot_version_id))
                     conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -696,6 +1123,7 @@ class TaskWorker:
                     # 上游配置无效（未填地址/密钥等）：明确失败释放预占，不作为未知持账
                     logger.error(f"Task {task_id} Image API misconfig: {e}")
                     with get_db(immediate=True) as conn:
+                        _finish_generation_attempt(conn, task_id, "failed", error=e)
                         conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (err_str, task_id))
                         conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (err_str, slot_version_id))
                         conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -704,6 +1132,7 @@ class TaskWorker:
                 elif isinstance(e, ValueError) and "Policy Violation" in err_str:
                     logger.warning(f"Task {task_id} Policy Violation: {e}")
                     with get_db(immediate=True) as conn:
+                        _finish_generation_attempt(conn, task_id, "failed", error=e)
                         conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (err_str, task_id))
                         conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (err_str, slot_version_id))
                         conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
@@ -713,6 +1142,7 @@ class TaskWorker:
                     # 通用未捕获异常：保守作为 unknown 处理，暂停批次，绝不盲目假定未扣费！
                     logger.error(f"Task {task_id} Unhandled Exception (Conservatively held as unknown): {e}", exc_info=True)
                     with get_db(immediate=True) as conn:
+                        _finish_generation_attempt(conn, task_id, "unknown", error=e)
                         conn.execute("UPDATE tasks SET status = 'unknown', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (err_str, task_id))
                         conn.execute("UPDATE slot_versions SET process_status = 'unknown_pending_confirmation', is_unknown = 1, error_message = ? WHERE id = ?", (err_str, slot_version_id))
                         if ledger_id:

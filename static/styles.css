@@ -338,6 +338,19 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .bulk-toolbar label { display: inline-flex; gap: 8px; align-items: center; }
 .bulk-toolbar button { margin-left: auto; }
 .workbench-notice p { width: 100%; margin: 0; }
+.technical-failures-panel { margin: 0 0 16px; padding: 16px; border-color: #fde2e2; background: linear-gradient(180deg,#fff 0%,#fffafa 100%); }
+.technical-failures-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.technical-failures-heading h3 { display:flex; align-items:center; gap:8px; color:#3f2630; font-size:14px; font-weight:800; }
+.technical-failures-heading p { max-width:860px; margin-top:5px; color:#7b6270; font-size:12px; line-height:1.6; }
+.technical-failures-list { display:grid; gap:8px; margin-top:13px; }
+.technical-failure-item { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; padding:10px 12px; border:1px solid #f4dfe3; border-radius:10px; background:#fff; color:#49323b; font-size:12px; }
+.technical-failure-item strong { color:#3b2931; }
+.technical-failure-item small { color:#8a6b75; }
+.technical-failure-item .technical-failure-error { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:Consolas,"Cascadia Mono",monospace; }
+.technical-failures-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; flex-wrap:wrap; margin-top:12px; padding-top:12px; border-top:1px solid #f7e5e8; color:#74434d; font-size:12px; }
+.technical-failures-actions label { display:inline-flex; align-items:center; gap:7px; }
+.long-list-card { content-visibility:auto; contain-intrinsic-size:auto 720px; }
+.lazy-media { background:#f1f5f9; }
 .settings-inline { display: flex; align-items: end; gap: 10px; margin-top: 16px; flex-wrap: wrap; font-size: 12px; }
 .settings-inline label { display: grid; gap: 6px; }
 .watermark-preview { display: flex; align-items: center; gap: 12px; color: #64748b; font-size: 12px; }
@@ -366,6 +379,9 @@ img[src*='/api/media/preview/'] { cursor: zoom-in; }
   .role-switch-label, .role-switch .role-legacy { display: none; }
   .role-switch { max-width: 100%; overflow-x: auto; }
   .bulk-failure-item { align-items: flex-start; flex-direction: column; }
+  .technical-failures-heading { flex-direction:column; }
+  .technical-failure-item { grid-template-columns:auto minmax(0,1fr); }
+  .technical-failure-item > .wb-badge { grid-column:2; justify-self:start; }
 }
 
 /* ---------- 窄屏适配 ---------- */

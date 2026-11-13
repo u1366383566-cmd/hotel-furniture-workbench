@@ -64,6 +64,7 @@ async function loadWorkbenchSettings() {
     document.getElementById('budget-per-warning').value=settings.warning_per_group;
     document.getElementById('budget-per-hard').value=settings.hard_limit_per_group;
     document.getElementById('auto-release-unknown').checked=settings.auto_release_unknown;
+    document.getElementById('auto-retry-request-failures').checked=settings.auto_retry_request_failures;
     const risks=await apiFetch('/api/workbench/risk-releases');
     document.getElementById('risk-release-count').textContent=risks.count;
     const list=document.getElementById('risk-release-list'); list.replaceChildren();
@@ -71,6 +72,42 @@ async function loadWorkbenchSettings() {
   } catch(e) { showToast(e.message,true); }
 }
 document.addEventListener('DOMContentLoaded',()=>{
+  document.getElementById('auto-retry-request-failures').addEventListener('change', event => {
+    if (event.target.checked) document.getElementById('auto-release-unknown').checked = true;
+  });
+  document.getElementById('technical-failures-refresh').addEventListener('click', loadTechnicalFailures);
+  document.getElementById('technical-failures-select-all').addEventListener('change', event => {
+    for (const box of document.querySelectorAll('#technical-failures-list input[data-task-id]:not(:disabled)')) {
+      box.checked = event.target.checked;
+    }
+  });
+  document.getElementById('technical-failures-retry').addEventListener('click', async event => {
+    const taskIds = [...document.querySelectorAll('#technical-failures-list input[data-task-id]:checked')]
+      .map(box => box.dataset.taskId);
+    if (!taskIds.length) return showToast('请选择技术失败项', true);
+    if (!document.getElementById('technical-failures-accept-risk').checked) {
+      return showToast('请先确认上游扣费未知风险', true);
+    }
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '正在重新排队…';
+    try {
+      const result = await apiFetch(`/api/workbench/batches/${state.currentBatchId}/retry-technical-failures`, {
+        method: 'POST',
+        body: JSON.stringify({task_ids: taskIds, accept_unknown_charge: true}),
+      });
+      const ok = result.results.filter(item => item.ok).length;
+      const failed = result.results.length - ok;
+      showToast(`已重新排队 ${ok} 项${failed ? `，${failed} 项未处理` : ''}`, failed > 0);
+      await loadDesigns(true);
+      await loadTechnicalFailures();
+      await loadBudget();
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      event.currentTarget.disabled = false;
+      event.currentTarget.textContent = '重试所选失败项';
+    }
+  });
   document.addEventListener('change',e=>{
     const type=e.target.dataset.select;
     if(type && workbenchSelection[type]) { selectWorkbenchItem(type,e.target.dataset.id,e.target.checked); syncBulkSelections(); }
@@ -106,7 +143,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     } catch(e){showToast(e.message,true);}
   });
   document.getElementById('budget-settings-save').addEventListener('click',async()=>{
-    try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value),auto_release_unknown:document.getElementById('auto-release-unknown').checked};
+    try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value),auto_release_unknown:document.getElementById('auto-release-unknown').checked,auto_retry_request_failures:document.getElementById('auto-retry-request-failures').checked};
       await apiFetch('/api/workbench/budget-settings',{method:'PUT',body:JSON.stringify(body)}); showToast('新任务默认额度已保存');
     } catch(e){showToast(e.message,true);}
   });
