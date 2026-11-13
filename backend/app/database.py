@@ -59,6 +59,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('planning_jobs', 'replan_count', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('planning_jobs', 'technical_retry_count', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('planning_jobs', 'retry_after', 'TEXT')
+    add_col_if_missing('planning_jobs', 'started_at', 'TEXT')
     add_col_if_missing('tasks', 'retry_after', 'TEXT')
     add_col_if_missing('tasks', 'trial_epoch', 'INTEGER')
     add_col_if_missing('tasks', 'failure_stage', 'TEXT')

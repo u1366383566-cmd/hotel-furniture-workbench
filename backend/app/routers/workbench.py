@@ -164,7 +164,8 @@ def archive_selected(batch_id: str, req: QuadSelection, user: UserContext = Depe
 @router.get('/batches/{batch_id}/planning')
 def planning_status(batch_id: str, user: UserContext = Depends(require_roles(['operator','leader','admin']))):
     with get_db() as conn:
-        rows=conn.execute('SELECT design_id,status,error,attempts FROM planning_jobs WHERE batch_id=? ORDER BY created_at',(batch_id,)).fetchall()
+        rows=conn.execute("""SELECT design_id,status,error,attempts,technical_retry_count,
+            retry_after,started_at FROM planning_jobs WHERE batch_id=? ORDER BY created_at""",(batch_id,)).fetchall()
         return {'jobs':[dict(r) for r in rows]}
 
 

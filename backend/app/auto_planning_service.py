@@ -42,7 +42,9 @@ def process_next_plan():
             ORDER BY p.created_at,p.id LIMIT 1""").fetchone()
         if not job:
             return False
-        conn.execute("UPDATE planning_jobs SET status='running', attempts=attempts+1, updated_at=datetime('now','localtime') WHERE id=?", (job['id'],))
+        conn.execute("""UPDATE planning_jobs SET status='running',attempts=attempts+1,
+            started_at=datetime('now','localtime'),updated_at=datetime('now','localtime')
+            WHERE id=?""", (job['id'],))
     try:
         with get_db() as conn:
             current = _design(conn,job['design_id'])

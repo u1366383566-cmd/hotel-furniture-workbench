@@ -34,11 +34,12 @@ def test_planning_retries_only_temporary_failures(client, monkeypatch, temporary
     for attempt in range(3 if temporary else 1):
         assert process_next_plan()
         with get_db() as conn:
-            row = conn.execute('SELECT status,technical_retry_count,retry_after FROM planning_jobs WHERE batch_id=?', (bid,)).fetchone()
+            row = conn.execute('SELECT status,technical_retry_count,retry_after,started_at FROM planning_jobs WHERE batch_id=?', (bid,)).fetchone()
         if temporary and attempt < 2:
             assert row['status'] == 'queued'
             assert row['technical_retry_count'] == attempt + 1
             assert row['retry_after']
+            assert row['started_at']
             assert not process_next_plan()
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE planning_jobs SET retry_after=NULL WHERE batch_id=?", (bid,))
