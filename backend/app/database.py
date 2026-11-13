@@ -47,6 +47,7 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('workbench_settings', 'auto_release_unknown', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'trial_run_remaining', 'INTEGER DEFAULT 0')
     add_col_if_missing('batches', 'trial_mode', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('batches', 'trial_epoch', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'approved_series_rules_json', 'TEXT')
     add_col_if_missing('batches', 'approved_rule_snapshot_status', "TEXT NOT NULL DEFAULT 'legacy_unfrozen'")
     add_col_if_missing('batches', 'smart_planning', 'INTEGER NOT NULL DEFAULT 0')
@@ -56,6 +57,12 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('batches', 'series_counts_json', "TEXT NOT NULL DEFAULT '{}'")
     add_col_if_missing('batches', 'series_preferences_json', "TEXT NOT NULL DEFAULT '{}'")
     add_col_if_missing('planning_jobs', 'replan_count', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('planning_jobs', 'technical_retry_count', 'INTEGER NOT NULL DEFAULT 0')
+    add_col_if_missing('planning_jobs', 'retry_after', 'TEXT')
+    add_col_if_missing('tasks', 'retry_after', 'TEXT')
+    add_col_if_missing('tasks', 'trial_epoch', 'INTEGER')
+    add_col_if_missing('tasks', 'failure_stage', 'TEXT')
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_design_version ON tasks(design_id,slot_version_id)")
     add_col_if_missing('watermark_configs', 'renderer', "TEXT NOT NULL DEFAULT 'seezo_logo'")
     add_col_if_missing('watermark_configs', 'logo_asset', "TEXT NOT NULL DEFAULT 'static/seezo-watermark.png'")
     add_col_if_missing('watermark_configs', 'logo_width_ratio', 'REAL NOT NULL DEFAULT 0.20')
@@ -96,6 +103,15 @@ def _ensure_columns(conn: sqlite3.Connection):
     """)
     conn.execute("CREATE TABLE IF NOT EXISTS nas_upload_settings (id INTEGER PRIMARY KEY CHECK(id=1), auto_enabled INTEGER NOT NULL DEFAULT 0, test_design_id TEXT)")
     conn.execute("INSERT OR IGNORE INTO nas_upload_settings(id,auto_enabled) VALUES (1,0)")
+    # Only audited risk releases are backfilled; other legacy failures remain
+    # unclassified and are never inferred from their error text.
+    conn.execute("""UPDATE tasks SET failure_stage='request_charge_unknown'
+        WHERE failure_stage IS NULL AND status='failed' AND EXISTS (
+            SELECT 1 FROM audit_logs a WHERE a.batch_id=tasks.batch_id
+              AND a.action IN ('auto_release_unknown','risk_release_unknown')
+              AND json_valid(a.detail) AND json_extract(a.detail,'$.task_id')=tasks.id
+              AND json_extract(a.detail,'$.upstream_charge')='unknown'
+        )""")
     add_col_if_missing('slot_versions', 'template_version', "TEXT DEFAULT 'tpl_v1.0'")
     add_col_if_missing('slot_versions', 'prompt_metadata', 'TEXT')
     add_col_if_missing('slot_versions', 'mock_visual_features', 'TEXT')

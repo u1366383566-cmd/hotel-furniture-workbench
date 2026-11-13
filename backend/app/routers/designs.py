@@ -32,6 +32,11 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
     # 获取 4 个槽位
     cur.execute("SELECT * FROM slots WHERE design_id = ?", (design_id,))
     slot_rows = cur.fetchall()
+    task_rows = conn.execute("""SELECT slot_version_id,retry_after,failure_stage
+        FROM tasks WHERE design_id=? ORDER BY created_at DESC""", (design_id,)).fetchall()
+    tasks_by_version = {}
+    for task_row in task_rows:
+        tasks_by_version.setdefault(task_row['slot_version_id'], task_row)
 
     slots_dict: Dict[str, SlotDetail] = {}
     for sr in slot_rows:
@@ -46,6 +51,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         versions_list = []
         curr_v_detail = None
         for vr in v_rows:
+            task_info = tasks_by_version.get(vr["id"])
             # 权限隔离：非管理员严禁返回底层磁盘原始图片路径
             raw_path_exposed = vr["raw_image_path"] if is_admin else None
 
@@ -63,6 +69,8 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
                 is_mock=bool(vr["is_mock"]),
                 upstream_request_id=vr["upstream_request_id"],
                 process_status=vr["process_status"],
+                retry_after=task_info["retry_after"] if task_info else None,
+                failure_stage=task_info["failure_stage"] if task_info else None,
                 is_locked=bool(vr["is_locked"]),
                 is_invalidated=bool(vr["is_invalidated"]),
                 depends_on_panorama_version_id=vr["depends_on_panorama_version_id"],

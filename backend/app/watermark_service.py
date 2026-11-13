@@ -220,6 +220,13 @@ def ensure_watermark_config_schema(conn) -> None:
             conn.execute(f"ALTER TABLE watermark_configs ADD COLUMN {name} {declaration}")
 
 
+class PreviewRecoveryError(ConnectionResetError):
+    def __init__(self, raw_filename, storage_error=False):
+        super().__init__("原图已保存，预览恢复失败")
+        self.raw_filename = raw_filename
+        self.storage_error = storage_error
+
+
 def save_real_slot_image(
     raw_bytes: bytes,
     slot_type: str,
@@ -248,11 +255,20 @@ def save_real_slot_image(
 
     img.save(RAW_IMAGES_DIR / raw_filename, format="PNG")
 
-    wm = watermark_config(watermark_cfg)
-    preview_img = apply_watermark(img, watermark_cfg=wm)
-    preview_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-    preview_img.save(PREVIEW_IMAGES_DIR / preview_filename, format="JPEG", quality=88)
-    return raw_filename, preview_filename
+    for _ in range(3):
+        try:
+            with Image.open(RAW_IMAGES_DIR / raw_filename) as raw:
+                raw.load()
+                wm = watermark_config(watermark_cfg)
+                preview_img = apply_watermark(raw, watermark_cfg=wm)
+                preview_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+                preview_img.save(PREVIEW_IMAGES_DIR / preview_filename, format="JPEG", quality=88)
+            return raw_filename, preview_filename
+        except OSError as exc:
+            raise PreviewRecoveryError(raw_filename, storage_error=True) from exc
+        except Exception:
+            pass
+    raise PreviewRecoveryError(raw_filename)
 
 
 def save_mock_slot_image(

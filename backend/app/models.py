@@ -82,6 +82,8 @@ class SlotVersionDetail(BaseModel):
     is_mock: bool
     upstream_request_id: Optional[str] = None
     process_status: str
+    retry_after: Optional[str] = None
+    failure_stage: Optional[str] = None
     is_locked: bool
     is_invalidated: bool
     depends_on_panorama_version_id: Optional[str] = None

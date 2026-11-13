@@ -247,6 +247,7 @@ def test_fault_injections_and_circuit_breaker(client):
         conn.execute("INSERT INTO designs (id, batch_id, series_id, design_code, structured_spec) VALUES (?, ?, 'modern_business', 'TO-01', '{}')", (did1, batch_id))
         conn.execute("INSERT INTO slots (id, design_id, slot_type) VALUES (?, ?, 'panorama')", (sid1, did1))
         conn.execute("INSERT INTO slot_versions (id, slot_id, design_id, prompt) VALUES (?, ?, ?, '__INJECT_TIMEOUT__')", (vid1, sid1, did1))
+        conn.execute("UPDATE slots SET current_version_id=? WHERE id=?", (vid1, sid1))
         conn.execute("INSERT INTO tasks (id, batch_id, design_id, slot_id, slot_version_id, task_type, status) VALUES (?, ?, ?, ?, ?, 'generate_panorama', 'queued')", (tid1, batch_id, did1, sid1, vid1))
 
     worker_instance.process_next_task()
@@ -281,6 +282,7 @@ def test_fault_injections_and_circuit_breaker(client):
         conn.execute("INSERT INTO designs (id, batch_id, series_id, design_code, structured_spec) VALUES (?, ?, 'modern_business', 'AUTH-01', '{}')", (did2, batch_id2))
         conn.execute("INSERT INTO slots (id, design_id, slot_type) VALUES (?, ?, 'panorama')", (sid2, did2))
         conn.execute("INSERT INTO slot_versions (id, slot_id, design_id, prompt) VALUES (?, ?, ?, '__INJECT_401__')", (vid2, sid2, did2))
+        conn.execute("UPDATE slots SET current_version_id=? WHERE id=?", (vid2, sid2))
         conn.execute("INSERT INTO tasks (id, batch_id, design_id, slot_id, slot_version_id, task_type, status) VALUES (?, ?, ?, ?, ?, 'generate_panorama', 'queued')", (tid2, batch_id2, did2, sid2, vid2))
 
     worker_instance.process_next_task()
@@ -308,6 +310,7 @@ def test_fault_injections_and_circuit_breaker(client):
         conn.execute("INSERT INTO designs (id, batch_id, series_id, design_code, structured_spec) VALUES (?, ?, 'modern_business', 'RT-01', '{}')", (did3, batch_id3))
         conn.execute("INSERT INTO slots (id, design_id, slot_type) VALUES (?, ?, 'panorama')", (sid3, did3))
         conn.execute("INSERT INTO slot_versions (id, slot_id, design_id, prompt) VALUES (?, ?, ?, '__INJECT_429__')", (vid3, sid3, did3))
+        conn.execute("UPDATE slots SET current_version_id=? WHERE id=?", (vid3, sid3))
         conn.execute("INSERT INTO tasks (id, batch_id, design_id, slot_id, slot_version_id, task_type, status) VALUES (?, ?, ?, ?, ?, 'generate_panorama', 'queued')", (tid3, batch_id3, did3, sid3, vid3))
 
     worker_instance.process_next_task() # 第 1 次 429 技术重试
@@ -382,6 +385,7 @@ def test_post_process_watermark_failure_keeps_budget_settled(client):
         conn.execute("INSERT INTO designs (id, batch_id, series_id, design_code, structured_spec) VALUES (?, ?, 'modern_business', 'WM-01', '{}')", (did, batch_id))
         conn.execute("INSERT INTO slots (id, design_id, slot_type) VALUES (?, ?, 'panorama')", (sid, did))
         conn.execute("INSERT INTO slot_versions (id, slot_id, design_id, prompt) VALUES (?, ?, ?, '__INJECT_WATERMARK_FAIL__')", (vid, sid, did))
+        conn.execute("UPDATE slots SET current_version_id=? WHERE id=?", (vid, sid))
         lid = reserve_budget(conn, batch_id=batch_id, category="image_generation", amount=1, task_id=tid)
         conn.execute("INSERT INTO tasks (id, batch_id, design_id, slot_id, slot_version_id, task_type, status) VALUES (?, ?, ?, ?, ?, 'generate_panorama', 'queued')", (tid, batch_id, did, sid, vid))
 
@@ -424,6 +428,7 @@ def test_connection_reset_is_unknown_not_429(client):
         conn.execute("INSERT INTO designs (id, batch_id, series_id, design_code, structured_spec) VALUES (?, ?, 'modern_business', 'CR-01', '{}')", (did, batch_id))
         conn.execute("INSERT INTO slots (id, design_id, slot_type) VALUES (?, ?, 'panorama')", (sid, did))
         conn.execute("INSERT INTO slot_versions (id, slot_id, design_id, prompt) VALUES (?, ?, ?, '__INJECT_CONNECTION_RESET__')", (vid, sid, did))
+        conn.execute("UPDATE slots SET current_version_id=? WHERE id=?", (vid, sid))
         lid = reserve_budget(conn, batch_id=batch_id, category="image_generation", amount=1, task_id=tid)
         conn.execute("INSERT INTO tasks (id, batch_id, design_id, slot_id, slot_version_id, task_type, status) VALUES (?, ?, ?, ?, ?, 'generate_panorama', 'queued')", (tid, batch_id, did, sid, vid))
 

@@ -7,7 +7,8 @@ from ..models import SlotRedoRequest, SlotVersionSelectRequest, PanoramaReplaceR
 from ..security import UserContext, get_current_user, require_roles
 from ..budget_service import reserve_budget
 from ..planning_service import build_mock_visual_features, build_slot_prompt
-from ..config import DEFAULT_REDO_SLOT_LIMIT, DEFAULT_REDO_DESIGN_LIMIT
+from ..config import DEFAULT_REDO_SLOT_LIMIT, DEFAULT_REDO_DESIGN_LIMIT, RAW_IMAGES_DIR
+from PIL import Image
 
 router = APIRouter(prefix="/api/slots", tags=["Slots"])
 
@@ -158,11 +159,12 @@ def redo_slot(
             old_version = conn.execute('SELECT process_status FROM slot_versions WHERE id=? AND slot_id=?', (curr_vid, slot_id)).fetchone()
             if old_version and old_version['process_status'] == 'failed':
                 conn.execute("""UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id',?)
-                    WHERE design_id=? AND process_status='pending' AND json_valid(prompt_metadata)
+                    WHERE design_id=? AND process_status='pending' AND is_invalidated=0
+                    AND depends_on_panorama_version_id=? AND json_valid(prompt_metadata)
                     AND json_extract(prompt_metadata,'$.reference_version_id')=?
-                    AND slot_id IN (SELECT id FROM slots WHERE design_id=? AND slot_type IN ('twin_bed','nightstand_closeup'))
+                    AND id IN (SELECT current_version_id FROM slots WHERE design_id=? AND slot_type IN ('twin_bed','nightstand_closeup'))
                     AND EXISTS (SELECT 1 FROM tasks t WHERE t.slot_version_id=slot_versions.id AND t.status='queued')""",
-                    (new_vid,design_id,curr_vid,design_id))
+                    (new_vid,design_id,depends_on,curr_vid,design_id))
 
         # 记录审核
         conn.execute("""
@@ -187,7 +189,7 @@ def select_version(
     with get_db(immediate=True) as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT s.id, s.slot_type, s.design_id, d.status as design_status
+            SELECT s.id, s.slot_type, s.design_id, s.current_version_id, d.status as design_status
             FROM slots s
             JOIN designs d ON s.design_id = d.id
             WHERE s.id = ?
@@ -209,7 +211,7 @@ def select_version(
             )
 
         # 验证要回选的下游版本
-        cur.execute("SELECT id, is_invalidated, process_status, depends_on_panorama_version_id FROM slot_versions WHERE id = ? AND slot_id = ?", (req.version_id, slot_id))
+        cur.execute("SELECT id, is_invalidated, process_status, depends_on_panorama_version_id, raw_image_path FROM slot_versions WHERE id = ? AND slot_id = ?", (req.version_id, slot_id))
         v_row = cur.fetchone()
         if not v_row:
             raise HTTPException(status_code=404, detail="指定的版本不存在于该槽位")
@@ -228,6 +230,23 @@ def select_version(
                 detail=f"该版本依赖的历史全景 ({v_row['depends_on_panorama_version_id']}) 与当前全景基准 ({active_pano_vid}) 不一致，禁止回选！"
             )
 
+        if s_row["slot_type"] == "white_isolated":
+            try:
+                if not v_row["raw_image_path"]:
+                    raise ValueError("missing raw image")
+                with Image.open(RAW_IMAGES_DIR / v_row["raw_image_path"]) as raw_image:
+                    raw_image.verify()
+            except (OSError, ValueError):
+                raise HTTPException(status_code=409, detail="白底原图不可读取，无法回选")
+            old_id = s_row["current_version_id"]
+            conn.execute("""UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id',?)
+                WHERE design_id=? AND process_status='pending' AND is_invalidated=0
+                AND depends_on_panorama_version_id=? AND json_valid(prompt_metadata)
+                AND json_extract(prompt_metadata,'$.reference_version_id')=?
+                AND id IN (SELECT s.current_version_id FROM slots s
+                    JOIN tasks t ON t.slot_version_id=s.current_version_id
+                    WHERE s.design_id=? AND s.slot_type IN ('twin_bed','nightstand_closeup') AND t.status='queued')""",
+                (req.version_id, s_row["design_id"], active_pano_vid, old_id, s_row["design_id"]))
         conn.execute("UPDATE slots SET current_version_id = ?, status = 'ready', updated_at = datetime('now', 'localtime') WHERE id = ?", (req.version_id, slot_id))
         
         # 审计日志

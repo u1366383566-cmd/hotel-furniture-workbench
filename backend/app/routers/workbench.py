@@ -179,7 +179,8 @@ def retry_planning(batch_id: str, user: UserContext = Depends(require_roles(['op
         # jobs are left untouched and no new design is created by this endpoint.
         cur=conn.execute("""
             UPDATE planning_jobs
-            SET status='queued', error=NULL, updated_at=datetime('now','localtime')
+            SET status='queued', error=NULL, technical_retry_count=0, retry_after=NULL,
+                updated_at=datetime('now','localtime')
             WHERE batch_id=? AND status='failed'
               AND design_id IN (SELECT id FROM designs WHERE status='draft')
         """,(batch_id,))

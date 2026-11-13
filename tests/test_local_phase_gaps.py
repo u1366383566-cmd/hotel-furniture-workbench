@@ -85,6 +85,77 @@ def test_circuit_trial_mode_really_limits_dispatch(client):
     assert state["pause_reason"] == "CIRCUIT_BROKEN"
 
 
+def test_trial_quota_is_reserved_before_concurrent_dispatch(client, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from backend.app.routers.batches import _queue_initial_panorama
+    response = client.post("/api/batches", headers={"X-User-Role": "leader"}, json={
+        "name": "Concurrent trial dispatch", "enabled_series": ["modern_business"],
+        "target_archived_count": 2, "designs_per_series": 2,
+        "standby_designs_per_series": 0, "auto_start_panorama": False,
+    })
+    assert response.status_code == 200, response.text
+    batch = response.json()
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE batches SET status='active',trial_mode=1,trial_run_remaining=1 WHERE id=?", (batch['id'],))
+        designs = conn.execute("SELECT id,design_code FROM designs WHERE batch_id=?", (batch['id'],)).fetchall()
+        assert len(designs) == 2
+        for design in designs:
+            _queue_initial_panorama(conn, batch['id'], design['id'], design['design_code'])
+    started, release = Event(), Event()
+    calls = []
+    def execute(row):
+        calls.append(row['id'])
+        started.set()
+        assert release.wait(5)
+    monkeypatch.setattr(worker_instance, '_execute_single_task', execute)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(worker_instance.process_next_task)
+        assert started.wait(5)
+        second = pool.submit(worker_instance.process_next_task)
+        assert second.result(timeout=5) is False
+        release.set()
+        assert first.result(timeout=5) is True
+    assert len(calls) == 1
+    with get_db() as conn:
+        assert conn.execute("SELECT trial_run_remaining FROM batches WHERE id=?", (batch['id'],)).fetchone()[0] == 0
+
+
+def test_circuit_recovery_cannot_reset_active_trial(client):
+    batch = _create_batch(client, "Trial recovery idempotence", auto=False)
+    with get_db(immediate=True) as conn:
+        conn.execute("""UPDATE batches SET status='paused',pause_reason='CIRCUIT_BROKEN',
+            is_circuit_broken=1 WHERE id=?""", (batch['id'],))
+    endpoint = f"/api/batches/{batch['id']}/circuit_break_recover"
+    headers = {'X-User-Role': 'leader'}
+    first = client.post(endpoint, headers=headers)
+    assert first.status_code == 200, first.text
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE batches SET trial_run_remaining=1 WHERE id=?", (batch['id'],))
+    second = client.post(endpoint, headers=headers)
+    assert second.status_code == 409
+    with get_db() as conn:
+        assert conn.execute("SELECT trial_run_remaining FROM batches WHERE id=?", (batch['id'],)).fetchone()[0] == 1
+
+
+def test_old_trial_result_cannot_close_new_trial(client, monkeypatch):
+    batch = _create_batch(client, "Old trial result")
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE batches SET trial_mode=1,trial_run_remaining=1,trial_epoch=1 WHERE id=?", (batch['id'],))
+    from backend.app import task_worker
+    original = task_worker.save_mock_slot_image
+    def late_result(*args, **kwargs):
+        result = original(*args, **kwargs)
+        with get_db(immediate=True) as conn:
+            conn.execute("UPDATE batches SET trial_epoch=2,trial_run_remaining=0 WHERE id=?", (batch['id'],))
+        return result
+    monkeypatch.setattr(task_worker, 'save_mock_slot_image', late_result)
+    assert worker_instance.process_next_task()
+    with get_db() as conn:
+        state = conn.execute("SELECT is_circuit_broken,status FROM batches WHERE id=?", (batch['id'],)).fetchone()
+    assert state['is_circuit_broken'] == 0 and state['status'] == 'active'
+
+
 def test_generation_versions_inherit_frozen_design_template(client):
     updated = client.put("/api/system/series_rules/modern_business", json={
         "white_bg_rule": "Inherited by all generated versions"

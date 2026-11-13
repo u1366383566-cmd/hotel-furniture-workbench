@@ -34,12 +34,18 @@ POLICY_KEYWORDS = ("policy", "content_policy", "content policy", "sensitive", "�
 
 class ExplicitRateLimitError(Exception):
     """显式 HTTP 429 速率限制（区别于连接断开）；有界技术重试。"""
-    pass
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class ImageApiMisconfigError(ValueError):
     """上游配置无效：明确失败释放预占，不作为未知结果持账。"""
     pass
+
+
+class TemporaryPlanningError(ValueError):
+    """Retryable transport or server failure in text planning."""
 
 
 def load_image_api_config(conn: sqlite3.Connection) -> dict:
@@ -114,6 +120,27 @@ class ImageRequestServerError(ConnectionResetError):
     pass
 
 
+class ImageResultDownloadError(ConnectionResetError):
+    """An upstream image result was returned but could not be retrieved."""
+
+
+def _download_result(client, url, key, base):
+    # Only retry the result GET. Never resend the image-generation POST.
+    for _ in range(3):
+        try:
+            response = client.get(url)
+            if response.status_code in (401, 403):
+                target, origin = httpx.URL(url), httpx.URL(base)
+                if (target.scheme, target.host, target.port) == (origin.scheme, origin.host, origin.port):
+                    response = client.get(url, headers={"Authorization": f"Bearer {key}"})
+            if response.status_code == 200 and response.content:
+                return response.content
+        except httpx.TransportError:
+            pass
+    # Do not include the URL or transport exception: it may contain credentials.
+    raise ImageResultDownloadError("生图结果下载失败，已重试两次")
+
+
 def _classify_response(response: httpx.Response, action: str) -> None:
     """把上游 HTTP 状态映射为工作台故障分类（见模块 docstring）。"""
     if response.status_code in (200, 201):
@@ -123,7 +150,7 @@ def _classify_response(response: httpx.Response, action: str) -> None:
     if response.status_code in (401, 403):
         raise PermissionError(f"HTTP {response.status_code}: 生图上游明确拒绝 ({detail[:200]})")
     if response.status_code == 429:
-        raise ExplicitRateLimitError(f"HTTP 429: 生图上游限流 ({detail[:200]})")
+        raise ExplicitRateLimitError(f"HTTP 429: 生图上游限流 ({detail[:200]})", response.headers.get("Retry-After"))
     if response.status_code >= 500:
         # 服务端内部错误：无法确认请求是否已被受理，保守按未知处理
         raise ImageRequestServerError(f"生图上游服务端错误 HTTP {response.status_code} ({detail[:200]})")
@@ -204,17 +231,7 @@ def edit_image_real(cfg: dict, prompt: str, image_bytes: bytes, filename: str = 
                     raise ConnectionResetError("生图上游 b64 图片数据解码失败") from e
             url = (items[0].get("url") or "").strip()
             if url:
-                try:
-                    img_resp = client.get(url)
-                except httpx.TimeoutException as e:
-                    raise TimeoutError(f"下载生图结果超时: {e}") from e
-                except httpx.TransportError as e:
-                    raise ConnectionResetError(f"下载生图结果连接失败: {e}") from e
-                if img_resp.status_code in (401, 403):
-                    img_resp = client.get(url, headers={"Authorization": f"Bearer {key}"})
-                if img_resp.status_code != 200 or not img_resp.content:
-                    raise ConnectionResetError(f"下载生图结果失败 HTTP {img_resp.status_code}")
-                return img_resp.content, upstream_id
+                return _download_result(client, url, key, base), upstream_id
             raise ConnectionResetError("生图上游响应既无 b64_json 也无 url，保守按未知处理")
     except httpx.HTTPError as e:
         raise ConnectionResetError(f"生图上游通信异常: {e}") from e
@@ -241,11 +258,13 @@ def chat_completion_real(cfg: dict, system: str, user: str, llm_model: str = "au
         with httpx.Client(timeout=timeout_seconds) as client:
             resp = client.post(f"{base}/v1/chat/completions", json=payload, headers=headers)
     except httpx.TimeoutException as e:
-        raise ValueError(f"LLM 规划超时（{timeout_seconds}s），请重试") from e
+        raise TemporaryPlanningError(f"LLM 规划超时（{timeout_seconds}s），请重试") from e
     except httpx.TransportError as e:
-        raise ValueError(f"LLM 规划连接失败: {e}") from e
+        raise TemporaryPlanningError("LLM 规划连接失败") from e
     if resp.status_code in (401, 403):
         raise ValueError(f"LLM 规划鉴权被拒绝 (HTTP {resp.status_code})，请检查密钥")
+    if resp.status_code >= 500:
+        raise TemporaryPlanningError(f"LLM 规划请求失败 HTTP {resp.status_code}")
     if resp.status_code != 200:
         raise ValueError(f"LLM 规划请求失败 HTTP {resp.status_code}: {_error_detail_text(resp)[:200]}")
     try:
@@ -299,17 +318,7 @@ def generate_image_real(cfg: dict, prompt: str) -> tuple[bytes, str]:
                     raise ConnectionResetError("生图上游 b64 图片数据解码失败") from e
             url = (items[0].get("url") or "").strip()
             if url:
-                try:
-                    img_resp = client.get(url)
-                except httpx.TimeoutException as e:
-                    raise TimeoutError(f"下载生图结果超时: {e}") from e
-                except httpx.TransportError as e:
-                    raise ConnectionResetError(f"下载生图结果连接失败: {e}") from e
-                if img_resp.status_code in (401, 403):
-                    img_resp = client.get(url, headers={"Authorization": f"Bearer {key}"})
-                if img_resp.status_code != 200 or not img_resp.content:
-                    raise ConnectionResetError(f"下载生图结果失败 HTTP {img_resp.status_code}")
-                return img_resp.content, upstream_id
+                return _download_result(client, url, key, base), upstream_id
             raise ConnectionResetError("生图上游响应既无 b64_json 也无 url，保守按未知处理")
     except httpx.HTTPError as e:
         # 兜底：未预期的 HTTP 库异常一律按未知保守持账，绝不假定无消耗

@@ -36,6 +36,8 @@ def test_429_exhausted_failure_releases_reservation(client):
 
     for _ in range(4):  # 初次 + 3 次技术重试
         worker_instance.process_next_task()
+        with get_db(immediate=True) as conn:
+            conn.execute("UPDATE tasks SET retry_after=NULL WHERE id=?", (task["id"],))
 
     with get_db(immediate=False) as conn:
         task_status = conn.execute(

@@ -45,7 +45,7 @@ def release_unknown_risk(req: RiskReleaseRequest, user: UserContext = Depends(re
         if len(ledgers)!=1:
             raise HTTPException(409, '账本状态异常，请人工核对')
         ledger=ledgers[0]
-        conn.execute("UPDATE tasks SET status='failed',updated_at=datetime('now','localtime') WHERE id=?", (req.task_id,))
+        conn.execute("UPDATE tasks SET status='failed',failure_stage='request_charge_unknown',updated_at=datetime('now','localtime') WHERE id=?", (req.task_id,))
         conn.execute("UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message='上游扣费未知，负责人接受风险放行' WHERE id=?", (row['slot_version_id'],))
         if row['current_version_id']==row['slot_version_id'] and row['design_status'] not in ('archived','eliminated'):
             conn.execute("UPDATE slots SET status='empty',updated_at=datetime('now','localtime') WHERE id=?", (row['slot_id'],))
@@ -443,7 +443,8 @@ def resolve_unknown_task(
         cur = conn.cursor()
         cur.execute("""
             SELECT t.id, t.batch_id, t.slot_id, t.slot_version_id, t.status, bl.id as ledger_id,
-                   sv.process_status, sv.raw_image_path, sv.preview_image_path, s.slot_type, t.design_id,
+                   sv.process_status, sv.raw_image_path, sv.preview_image_path, sv.is_invalidated,
+                   sv.depends_on_panorama_version_id, s.slot_type, t.design_id,
                    d.status as design_status, s.current_version_id as slot_current_vid
             FROM tasks t
             JOIN slot_versions sv ON t.slot_version_id = sv.id
@@ -511,7 +512,11 @@ def resolve_unknown_task(
 
             # 核心防覆盖防复活约束：
             # 只有当设计非终态 (未淘汰且未归档)，且槽位当前指向正是该版本或为空时，才更新槽位指针与设计状态！
-            is_stale_or_finalized = (design_curr_status in ("eliminated", "archived")) or (slot_current_vid not in (vid, None))
+            pano = conn.execute("SELECT current_version_id FROM slots WHERE design_id=? AND slot_type='panorama'", (did,)).fetchone()
+            invalid_dependency = slot_type != 'panorama' and (
+                task_row['is_invalidated'] or not pano or
+                task_row['depends_on_panorama_version_id'] != pano['current_version_id'])
+            is_stale_or_finalized = (design_curr_status in ("eliminated", "archived")) or slot_current_vid != vid or invalid_dependency
 
             if not is_stale_or_finalized:
                 conn.execute("UPDATE slots SET status = 'ready', current_version_id = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (vid, sid))
@@ -521,6 +526,12 @@ def resolve_unknown_task(
                         SET status = 'panorama_review', updated_at = datetime('now', 'localtime') 
                         WHERE id = ? AND status = 'panorama_generating'
                     """, (did,))
+                else:
+                    downstream = conn.execute("""SELECT status FROM slots
+                        WHERE design_id=? AND slot_type IN ('white_isolated','twin_bed','nightstand_closeup')""", (did,)).fetchall()
+                    if len(downstream) == 3 and all(r['status'] in ('ready','approved') for r in downstream):
+                        conn.execute("""UPDATE designs SET status='quad_review',updated_at=datetime('now','localtime')
+                            WHERE id=? AND status IN ('downstream_generating','panorama_approved')""", (did,))
 
             if ledger_id:
                 resolve_unknown_budget(conn, bid, ledger_id, is_success=True)
@@ -569,6 +580,15 @@ def resolve_unknown_task(
 
         cur.execute("SELECT status, is_circuit_broken, pause_reason FROM batches WHERE id = ?", (bid,))
         batch_state = cur.fetchone()
+
+        if batch_state and batch_state["pause_reason"] == "PAUSE_RESULT_DOWNLOAD" and not batch_state["is_circuit_broken"]:
+            pending = conn.execute("""SELECT COUNT(DISTINCT design_id) FROM tasks
+                WHERE batch_id=? AND status='unknown' AND failure_stage='result_download'""", (bid,)).fetchone()[0]
+            other = conn.execute("""SELECT COUNT(*) FROM tasks WHERE batch_id=? AND status='unknown'
+                AND (failure_stage IS NULL OR failure_stage != 'result_download')""", (bid,)).fetchone()[0]
+            if pending < 2 and not other:
+                conn.execute("""UPDATE batches SET status='active',pause_reason=NULL,
+                    updated_at=datetime('now','localtime') WHERE id=? AND pause_reason='PAUSE_RESULT_DOWNLOAD'""", (bid,))
 
         if remaining_unknown == 0 and batch_state:
             # 只有在因 unknown 挂起暂停且未熔断时才恢复；人工主动暂停或熔断绝不恢复！

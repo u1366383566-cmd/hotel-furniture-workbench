@@ -1723,6 +1723,10 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
         </div>
       </div>
     `;
+  } else if (curVer && curVer.process_status === 'blocked') {
+    imgArea = `<div class="w-full aspect-square bg-amber-50 border border-amber-100 rounded-xl flex items-center justify-center text-amber-700 text-xs p-2 text-center">参考图片不可用，等待恢复</div>`;
+  } else if (curVer && curVer.process_status === 'unknown_pending_confirmation') {
+    imgArea = `<div class="w-full aspect-square bg-amber-50 border border-amber-100 rounded-xl flex items-center justify-center text-amber-700 text-xs p-2 text-center">结果待核账，请联系负责人</div>`;
   } else if (curVer && curVer.process_status === 'failed') {
     imgArea = `
       <div class="w-full aspect-square bg-rose-50 border border-rose-100 rounded-xl flex flex-col items-center justify-center text-rose-500 text-xs p-2 text-center">
@@ -1730,6 +1734,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
           <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
         </svg>
         生成失败
+        ${curVer.failure_stage === 'request_charge_unknown' ? '<span class="mt-2 text-amber-700">上游扣费未知，重做可能再次计费</span>' : ''}
       </div>
     `;
   } else {
@@ -1738,6 +1743,8 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
         ${
           waitingWhite
           ? (whiteFailed ? '等待白底图重做成功' : '等待白底图完成')
+          : isGenerating && curVer?.process_status === 'pending' && curVer?.retry_after
+          ? '等待限流重试'
           : isGenerating && curVer?.process_status === 'pending'
           ? '排队等待生成'
           : isGenerating

@@ -29,6 +29,29 @@ def test_accepted_request_risk_releases_and_audits(client,monkeypatch,error):
     assert json.loads(audit['detail'])['upstream_charge']=='unknown'
 
 
+def test_unknown_charge_release_never_automatically_reissues(client, monkeypatch):
+    batch = client.post('/api/batches', json={
+        'name':'unknown no resend','enabled_series':['modern_business'],
+        'target_archived_count':1,'designs_per_series':1,
+        'standby_designs_per_series':0,'auto_start_panorama':True,
+    }, headers={'X-User-Role':'leader'}).json()
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE workbench_settings SET auto_release_unknown=1 WHERE id='default'")
+    calls = []
+    monkeypatch.setattr(worker_module, 'load_image_api_config', lambda conn: {'enabled':True})
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise ImageRequestTimeout('生图上游超时: timeout')
+    monkeypatch.setattr(worker_module, 'generate_image_real', fail)
+    assert worker_module.worker_instance.process_next_task()
+    assert not worker_module.worker_instance.process_next_task()
+    worker_module.worker_instance.recover_interrupted_tasks()
+    assert not worker_module.worker_instance.process_next_task()
+    assert len(calls) == 1
+    with get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE batch_id=?", (batch['id'],)).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize('error,enabled',[(ImageRequestTimeout('生图上游超时: timeout'),False),(TimeoutError('下载生图结果超时'),True),(ConnectionResetError('响应非 JSON'),True)])
 def test_noneligible_or_disabled_stays_unknown(client,monkeypatch,error,enabled):
     batch,task,ledger,state,audit=make_task(client,monkeypatch,error,enabled)
@@ -47,6 +70,19 @@ def test_manual_risk_release_requires_explicit_ack_and_is_idempotent(client,monk
         assert conn.execute('SELECT status FROM budget_ledger WHERE id=?',(ledger['id'],)).fetchone()['status']=='released'
         details=json.loads(conn.execute("SELECT detail FROM audit_logs WHERE action='risk_release_unknown'").fetchone()['detail'])
         assert details['risk_accepted'] and details['upstream_charge']=='unknown'
+
+
+def test_legacy_risk_backfill_uses_audit_evidence(client, monkeypatch):
+    from backend.app.database import _ensure_columns
+    batch, task, ledger, state, audit = make_task(client, monkeypatch, ImageRequestTimeout('生图上游超时: timeout'), True)
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE tasks SET failure_stage=NULL WHERE id=?", (task['id'],))
+        _ensure_columns(conn)
+        assert conn.execute("SELECT failure_stage FROM tasks WHERE id=?", (task['id'],)).fetchone()[0] == 'request_charge_unknown'
+        conn.execute("UPDATE tasks SET failure_stage=NULL WHERE id=?", (task['id'],))
+        conn.execute("DELETE FROM audit_logs WHERE batch_id=? AND action='auto_release_unknown'", (batch['id'],))
+        _ensure_columns(conn)
+        assert conn.execute("SELECT failure_stage FROM tasks WHERE id=?", (task['id'],)).fetchone()[0] is None
 
 
 def test_automatic_release_does_not_override_other_pause(client,monkeypatch):

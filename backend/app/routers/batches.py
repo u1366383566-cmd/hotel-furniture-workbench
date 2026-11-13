@@ -573,10 +573,16 @@ def circuit_break_recover(
     解除熔断，设置 3 次少量试运行保护，试运行期间任务继续受监控，不跨日自动补足。
     """
     with get_db(immediate=True) as conn:
+        batch = conn.execute("SELECT is_circuit_broken FROM batches WHERE id=?", (batch_id,)).fetchone()
+        if not batch:
+            raise HTTPException(status_code=404, detail="批次不存在")
+        if not batch["is_circuit_broken"]:
+            raise HTTPException(status_code=409, detail="批次当前未熔断，不能重置试运行次数")
         conn.execute("""
             UPDATE batches 
             SET is_circuit_broken = 0, status = 'active', pause_reason = NULL,
-                trial_mode = 1, trial_run_remaining = 3, updated_at = datetime('now', 'localtime')
+                trial_mode = 1, trial_run_remaining = 3, trial_epoch = trial_epoch + 1,
+                updated_at = datetime('now', 'localtime')
             WHERE id = ?
         """, (batch_id,))
 

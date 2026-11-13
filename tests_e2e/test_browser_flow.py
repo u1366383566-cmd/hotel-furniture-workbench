@@ -434,6 +434,28 @@ def run_browser_verification():
             print("   basic accessible-name checks passed (not a full WCAG audit).")
             page.screenshot(path=str(EVIDENCE_DIR / "16_accessibility_names.png"))
 
+            status_html = page.evaluate(r"""
+                () => {
+                  const completedWhite = {process_status: 'completed'};
+                  const design = {design_code: 'STATUS', total_redo_count: 0,
+                                  slots: {white_isolated: {current_version: completedWhite}}};
+                  const render = (process_status, extra = {}, slotType = 'panorama') => renderSlotItem(
+                    {id: 'slot', slot_type: slotType, status: 'generating', redo_count: 0,
+                     current_version: {id: 'ver', version_num: 1, process_status, ...extra},
+                     history_versions: []},
+                    '状态', design, slotType === 'panorama');
+                  return [
+                    render('pending', {retry_after: '2099-01-01 00:00:00'}, 'twin_bed'),
+                    render('unknown_pending_confirmation'),
+                    render('failed', {failure_stage: 'request_charge_unknown'}),
+                    render('blocked')
+                  ].join('');
+                }
+            """)
+            for expected in ("等待限流重试", "结果待核账", "上游扣费未知，重做可能再次计费", "参考图片不可用，等待恢复"):
+                assert expected in status_html, f"页面缺少状态提示: {expected}"
+            print("   retry and unknown-image status messages rendered.")
+
             assert not blocked_external_requests, f"离线模式出现外部请求: {blocked_external_requests}"
             assert not [message for message in console_errors if "ERR_INTERNET_DISCONNECTED" in message], console_errors
 

@@ -5,12 +5,15 @@ import uuid
 import asyncio
 import logging
 import sqlite3
+import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from PIL import Image
 from typing import Optional, Dict, Any
 from .database import get_db
 from .config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
-from .watermark_service import save_mock_slot_image, save_real_slot_image
+from .watermark_service import save_mock_slot_image, save_real_slot_image, PreviewRecoveryError
 from .planning_service import build_real_generation_prompt
 from .budget_service import (
     settle_budget_success, release_budget_failed, hold_budget_unknown
@@ -18,14 +21,35 @@ from .budget_service import (
 from .image_adapter import (
     ExplicitRateLimitError, ImageApiMisconfigError,
     ImageRequestTimeout, ImageRequestServerError,
+    ImageResultDownloadError,
     generate_image_real, edit_image_real, load_image_api_config,
 )
 
 logger = logging.getLogger(__name__)
 
+
+class ReferenceUnavailableError(Exception):
+    """The local reference is unavailable before any upstream request."""
+
 # Unit tests call process_next_task explicitly. Keeping the production loop out of
 # those sessions removes cross-test timing while exercising the same worker code.
 BACKGROUND_LOOP_DISABLED = os.environ.get("WORKBENCH_DISABLE_WORKER_LOOP") == "1"
+
+
+def _rate_limit_delay(error, retry_count):
+    value = error.retry_after
+    if value:
+        try:
+            return max(0, int(value)) + random.randint(0, 3)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                return max(0, int((when - datetime.now(timezone.utc)).total_seconds())) + random.randint(0, 3)
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return (15, 30, 60)[min(retry_count, 2)] + random.randint(0, 3)
 
 class TaskWorker:
     def __init__(self):
@@ -66,7 +90,8 @@ class TaskWorker:
             cur.execute("""
                 SELECT t.id, t.batch_id, t.slot_version_id, t.slot_id, t.design_id,
                        sv.raw_image_path, sv.preview_image_path,
-                       d.status as design_status, s.current_version_id as slot_current_vid, s.status as slot_status
+                       d.status as design_status, s.current_version_id as slot_current_vid, s.status as slot_status,
+                       s.slot_type, sv.is_invalidated, sv.depends_on_panorama_version_id
                 FROM tasks t
                 JOIN slot_versions sv ON t.slot_version_id = sv.id
                 JOIN designs d ON t.design_id = d.id
@@ -100,9 +125,11 @@ class TaskWorker:
                         except Exception:
                             has_valid_disk_file = False
 
-                cur.execute("SELECT id FROM budget_ledger WHERE reference_task_id = ?", (tid,))
-                bl_row = cur.fetchone()
-                ledger_id = bl_row["id"] if bl_row else None
+                cur.execute("""SELECT id FROM budget_ledger WHERE reference_task_id = ?
+                    AND category = 'image_generation' AND status IN ('reserved','unknown_held')
+                    AND (ledger_event_type = 'generation_request' OR ledger_event_type IS NULL)""", (tid,))
+                bl_rows = cur.fetchall()
+                ledger_id = bl_rows[0]["id"] if len(bl_rows) == 1 else None
 
                 if has_valid_disk_file:
                     conn.execute("UPDATE tasks SET status = 'completed', updated_at = datetime('now', 'localtime') WHERE id = ?", (tid,))
@@ -111,8 +138,21 @@ class TaskWorker:
                         settle_budget_success(conn, bid, ledger_id, tid)
 
                     # 仅在设计非终态且槽位未被换指针时恢复指针
-                    if design_curr_status not in ("eliminated", "archived") and slot_current_vid in (vid, None):
+                    pano = conn.execute("SELECT current_version_id FROM slots WHERE design_id=? AND slot_type='panorama'", (did,)).fetchone()
+                    valid_dependency = row["slot_type"] == "panorama" or (
+                        not row["is_invalidated"] and pano and
+                        pano["current_version_id"] == row["depends_on_panorama_version_id"])
+                    if design_curr_status not in ("eliminated", "archived") and slot_current_vid == vid and valid_dependency:
                         conn.execute("UPDATE slots SET status = 'ready', current_version_id = ? WHERE id = ?", (vid, sid))
+                        if row["slot_type"] == "panorama":
+                            conn.execute("""UPDATE designs SET status='panorama_review',updated_at=datetime('now','localtime')
+                                WHERE id=? AND status='panorama_generating'""", (did,))
+                        else:
+                            downstream = conn.execute("""SELECT status FROM slots WHERE design_id=?
+                                AND slot_type IN ('white_isolated','twin_bed','nightstand_closeup')""", (did,)).fetchall()
+                            if len(downstream) == 3 and all(s['status'] in ('ready','approved') for s in downstream):
+                                conn.execute("""UPDATE designs SET status='quad_review',updated_at=datetime('now','localtime')
+                                    WHERE id=? AND status IN ('downstream_generating','panorama_approved')""", (did,))
                     logger.info(f"Recovered task {tid} as completed from valid disk file.")
                 else:
                     conn.execute("UPDATE tasks SET status = 'unknown', last_error = 'Interrupted by restart, unverified upstream state', updated_at = datetime('now', 'localtime') WHERE id = ?", (tid,))
@@ -121,7 +161,8 @@ class TaskWorker:
                         hold_budget_unknown(conn, bid, ledger_id, reason="Server restarted during execution")
                     conn.execute("""
                         UPDATE batches 
-                        SET status = 'paused', pause_reason = 'PAUSE_UNKNOWN_PENDING', updated_at = datetime('now', 'localtime')
+                        SET pause_reason = CASE WHEN status='active' THEN 'PAUSE_UNKNOWN_PENDING' ELSE pause_reason END,
+                            status = 'paused', updated_at = datetime('now', 'localtime')
                         WHERE id = ?
                     """, (bid,))
                     logger.warning(f"Recovered interrupted task {tid} as unknown_pending_confirmation and paused batch {bid}.")
@@ -146,7 +187,56 @@ class TaskWorker:
         - 批次无未决 unknown 挂起任务
         - 关联设计未淘汰 (status != 'eliminated')
         """
+        with get_db() as conn:
+            blocked = conn.execute("""SELECT t.id,t.slot_version_id,sv.prompt_metadata,
+                sv.depends_on_panorama_version_id,s.slot_type FROM tasks t
+                JOIN slot_versions sv ON sv.id=t.slot_version_id JOIN slots s ON s.id=t.slot_id
+                JOIN batches b ON b.id=t.batch_id
+                WHERE t.status='blocked' AND t.failure_stage='reference' AND b.status='active'""").fetchall()
+            candidates = []
+            for item in blocked:
+                meta = json.loads(item['prompt_metadata'] or '{}')
+                ref = meta.get('reference_version_id') or (item['depends_on_panorama_version_id'] if item['slot_type'] == 'white_isolated' else None)
+                image = conn.execute("SELECT raw_image_path FROM slot_versions WHERE id=? AND process_status='completed' AND is_invalidated=0", (ref,)).fetchone()
+                if image and image['raw_image_path']:
+                    candidates.append((item, ref, image['raw_image_path']))
+        for item, ref, path in candidates:
+            try:
+                with Image.open(RAW_IMAGES_DIR / path) as check:
+                    check.verify()
+            except (OSError, ValueError):
+                continue
+            with get_db(immediate=True) as conn:
+                updated = conn.execute("""UPDATE tasks SET status='queued',failure_stage=NULL,last_error=NULL
+                    WHERE id=? AND status='blocked' AND failure_stage='reference'
+                    AND EXISTS (SELECT 1 FROM slot_versions WHERE id=? AND raw_image_path=?
+                                AND process_status='completed' AND is_invalidated=0)
+                    AND EXISTS (SELECT 1 FROM slot_versions sv JOIN slots s ON s.id=sv.slot_id
+                                JOIN designs d ON d.id=sv.design_id JOIN batches b ON b.id=d.batch_id
+                                WHERE sv.id=tasks.slot_version_id AND s.current_version_id=sv.id
+                                  AND sv.is_invalidated=0 AND d.status NOT IN ('archived','eliminated')
+                                  AND b.status='active' AND b.is_circuit_broken=0
+                                  AND (json_extract(sv.prompt_metadata,'$.reference_version_id')=?
+                                       OR (s.slot_type='white_isolated' AND sv.depends_on_panorama_version_id=?)))""",
+                    (item['id'], ref, path, ref, ref))
+                if updated.rowcount:
+                    conn.execute("UPDATE slot_versions SET process_status='pending',error_message=NULL WHERE id=?", (item['slot_version_id'],))
         with get_db(immediate=True) as conn:
+            stale = conn.execute("""SELECT t.id,t.batch_id,t.slot_version_id
+                FROM tasks t JOIN slots s ON s.id=t.slot_id
+                JOIN slot_versions sv ON sv.id=t.slot_version_id JOIN designs d ON d.id=t.design_id
+                WHERE ((t.status='queued' AND t.retry_count=0) OR
+                       (t.status='blocked' AND t.failure_stage='reference' AND t.retry_count=0))
+                  AND (d.status IN ('archived','eliminated') OR sv.is_invalidated=1 OR s.current_version_id IS NOT sv.id)""").fetchall()
+            for old in stale:
+                ledgers = conn.execute("""SELECT id FROM budget_ledger WHERE reference_task_id=?
+                    AND category='image_generation' AND ledger_event_type='generation_request'
+                    AND status='reserved'""", (old['id'],)).fetchall()
+                if len(ledgers) != 1:
+                    continue
+                conn.execute("UPDATE tasks SET status='cancelled',last_error='任务版本已失效' WHERE id=?", (old['id'],))
+                conn.execute("UPDATE slot_versions SET process_status='cancelled' WHERE id=? AND process_status IN ('pending','blocked')", (old['slot_version_id'],))
+                release_budget_failed(conn, old['batch_id'], ledgers[0]['id'], reason='任务未发送且版本已失效')
             cur = conn.cursor()
             cur.execute("""
                 SELECT t.id, t.batch_id, t.design_id, t.slot_id, t.slot_version_id, t.task_type, t.retry_count,
@@ -161,14 +251,24 @@ class TaskWorker:
                 JOIN slots s ON t.slot_id = s.id
                 JOIN slot_versions sv ON t.slot_version_id = sv.id
                 WHERE t.status = 'queued'
+                  AND (t.retry_after IS NULL OR t.retry_after <= datetime('now','localtime'))
                   AND b.status = 'active'
                   AND b.is_circuit_broken = 0
                   AND NOT (b.trial_mode = 1 AND b.trial_run_remaining <= 0)
-                  AND d.status != 'eliminated'
+                  AND d.status NOT IN ('eliminated', 'archived')
+                  AND s.current_version_id = sv.id
+                  AND sv.is_invalidated = 0
+                  AND (s.slot_type = 'panorama' OR EXISTS (
+                      SELECT 1 FROM slots pano WHERE pano.design_id=d.id
+                          AND pano.slot_type='panorama'
+                          AND pano.current_version_id=sv.depends_on_panorama_version_id
+                  ))
                   AND NOT EXISTS (
                       SELECT 1 FROM slot_versions sv2
                       JOIN designs d2 ON sv2.design_id = d2.id
+                      JOIN tasks t2 ON t2.slot_version_id=sv2.id
                       WHERE d2.batch_id = t.batch_id AND sv2.process_status = 'unknown_pending_confirmation'
+                        AND (t2.failure_stage IS NULL OR t2.failure_stage != 'result_download' OR d2.id = d.id)
                   )
                   -- 白底依赖链顺序保险：双床/床头近景以白底清单图（white_isolated 当前版本）为
                   -- 以图生图参考，其成品未落盘前不领取，防止拿错参考图或空参考退化。
@@ -177,9 +277,13 @@ class TaskWorker:
                       OR EXISTS (
                           SELECT 1
                           FROM slots s2
-                          JOIN slot_versions sv2 ON sv2.id = COALESCE(json_extract(sv.prompt_metadata, '$.reference_version_id'), s2.current_version_id)
+                          JOIN slot_versions sv2 ON sv2.id = json_extract(sv.prompt_metadata, '$.reference_version_id')
                           WHERE s2.design_id = d.id
                             AND s2.slot_type = 'white_isolated'
+                            AND sv2.slot_id = s2.id
+                            AND sv2.design_id = d.id
+                            AND sv2.is_invalidated = 0
+                            AND sv2.depends_on_panorama_version_id = sv.depends_on_panorama_version_id
                             AND sv2.process_status = 'completed'
                             AND sv2.raw_image_path IS NOT NULL
                       )
@@ -192,7 +296,14 @@ class TaskWorker:
                 return False
 
             task_id = task_row["id"]
-            conn.execute("UPDATE tasks SET status = 'running', updated_at = datetime('now', 'localtime') WHERE id = ?", (task_id,))
+            # Reserve a trial attempt while holding the same write lock used to
+            # claim the task. Counting on completion permits concurrent overrun.
+            trial = conn.execute("SELECT trial_mode,trial_epoch FROM batches WHERE id=?", (task_row["batch_id"],)).fetchone()
+            conn.execute("""
+                UPDATE batches SET trial_run_remaining = trial_run_remaining - 1
+                WHERE id = ? AND trial_mode = 1 AND trial_run_remaining > 0
+            """, (task_row["batch_id"],))
+            conn.execute("UPDATE tasks SET status = 'running',trial_epoch=?, updated_at = datetime('now', 'localtime') WHERE id = ?", (trial['trial_epoch'] if trial['trial_mode'] else None, task_id))
             conn.execute("UPDATE slot_versions SET process_status = 'processing' WHERE id = ?", (task_row["slot_version_id"],))
 
         self._execute_single_task(task_row)
@@ -214,9 +325,11 @@ class TaskWorker:
 
         with get_db(immediate=False) as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id FROM budget_ledger WHERE reference_task_id = ?", (task_id,))
-            b_row = cur.fetchone()
-            ledger_id = b_row["id"] if b_row else None
+            cur.execute("""SELECT id FROM budget_ledger WHERE reference_task_id = ?
+                AND category = 'image_generation' AND status IN ('reserved','unknown_held')
+                AND (ledger_event_type = 'generation_request' OR ledger_event_type IS NULL)""", (task_id,))
+            b_rows = cur.fetchall()
+            ledger_id = b_rows[0]["id"] if len(b_rows) == 1 else None
 
             cur.execute("SELECT main_text, repeat_text, opacity, font_size, position FROM watermark_configs WHERE batch_id = ?", (batch_id,))
             wm_row = cur.fetchone()
@@ -239,18 +352,6 @@ class TaskWorker:
                 if slot_type != "panorama":
                     if slot_type == "white_isolated":
                         reference_dep_id = reference_dep_id or task_row["depends_on_panorama_version_id"]
-                    elif not reference_dep_id:
-                        # 双床/床头近景继承白底清单图（第一张白底图）为设计依据
-                        with get_db(immediate=False) as ref_conn:
-                            wi_row = ref_conn.execute("""
-                                SELECT sv.raw_image_path, sv.id
-                                FROM slots s JOIN slot_versions sv ON s.current_version_id = sv.id
-                                WHERE s.design_id = ? AND s.slot_type = 'white_isolated'
-                            """, (design_id,)).fetchone()
-                        if wi_row and wi_row["raw_image_path"]:
-                            reference_dep_id = wi_row["id"]
-                        else:
-                            reference_dep_id = task_row["depends_on_panorama_version_id"]
                     if reference_dep_id:
                         with get_db(immediate=False) as ref_conn:
                             ref_row = ref_conn.execute(
@@ -262,7 +363,7 @@ class TaskWorker:
                                 reference_bytes = ref_file.read_bytes()
 
                 if slot_type != 'panorama' and not reference_bytes:
-                    raise ValueError('参考图片不可用，无法执行以图生图')
+                    raise ReferenceUnavailableError('参考图片不可用，等待恢复后重试')
                 real_prompt = prompt_metadata.get('custom_prompt') or build_real_generation_prompt(
                     slot_type, structured_spec, design_code, prompt_metadata,
                     has_reference_image=reference_bytes is not None,
@@ -424,19 +525,20 @@ class TaskWorker:
                     settle_budget_success(conn, batch_id, ledger_id, task_id)
 
                 # 试运行检查：恢复后的试运行模式真正限制派发数量
-                cur.execute("SELECT trial_mode, trial_run_remaining FROM batches WHERE id = ?", (batch_id,))
+                cur.execute("""SELECT b.trial_mode,b.trial_run_remaining,b.trial_epoch,t.trial_epoch AS task_trial_epoch
+                    FROM batches b JOIN tasks t ON t.batch_id=b.id WHERE b.id=? AND t.id=?""", (batch_id,task_id))
                 b_tr = cur.fetchone()
-                if b_tr and b_tr["trial_mode"] == 1 and b_tr["trial_run_remaining"] > 0:
-                    if b_tr["trial_run_remaining"] == 1:
+                if b_tr and b_tr["trial_mode"] == 1 and b_tr["task_trial_epoch"] == b_tr["trial_epoch"] and b_tr["trial_run_remaining"] <= 0:
+                    if b_tr["trial_run_remaining"] == 0:
                         conn.execute("""
                             UPDATE batches
                             SET is_circuit_broken = 1,
                                 circuit_break_reason = 'Trial run quota exhausted',
-                                status = 'paused', pause_reason = 'CIRCUIT_BROKEN',
+                                pause_reason = CASE WHEN status='active' THEN 'CIRCUIT_BROKEN' ELSE pause_reason END,
+                                status = 'paused',
                                 updated_at = datetime('now', 'localtime')
                             WHERE id = ?
                         """, (batch_id,))
-                    conn.execute("UPDATE batches SET trial_run_remaining = trial_run_remaining - 1 WHERE id = ?", (batch_id,))
 
                 # 状态推进
                 if not is_stale_task:
@@ -454,18 +556,28 @@ class TaskWorker:
                         if all_downstream_ready and design_curr_status in ("downstream_generating", "panorama_approved"):
                             conn.execute("UPDATE designs SET status = 'quad_review', updated_at = datetime('now', 'localtime') WHERE id = ?", (design_id,))
 
+        except ReferenceUnavailableError as ref_error:
+            with get_db(immediate=True) as conn:
+                conn.execute("""UPDATE tasks SET status='blocked',failure_stage='reference',
+                    last_error=?,updated_at=datetime('now','localtime') WHERE id=?""",
+                    (str(ref_error), task_id))
+                conn.execute("""UPDATE slot_versions SET process_status='blocked',
+                    error_message=? WHERE id=?""", (str(ref_error), slot_version_id))
+
         except PermissionError as pe:
             # 明确拒绝 (401/403)：确认无扣费，释放预占预算，熔断批次
             logger.error(f"Task {task_id} Auth Failure: {pe}")
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(pe), task_id))
                 conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (str(pe), slot_version_id))
-                conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ?", (slot_id,))
+                conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                 if ledger_id:
                     release_budget_failed(conn, batch_id, ledger_id, reason=str(pe))
                 conn.execute("""
                     UPDATE batches 
-                    SET is_circuit_broken = 1, circuit_break_reason = ?, status = 'paused', pause_reason = 'CIRCUIT_BROKEN', updated_at = datetime('now', 'localtime')
+                    SET is_circuit_broken = 1, circuit_break_reason = ?,
+                        pause_reason = CASE WHEN status='active' THEN 'CIRCUIT_BROKEN' ELSE pause_reason END,
+                        status = 'paused', updated_at = datetime('now', 'localtime')
                     WHERE id = ?
                 """, (f"Circuit broken: {str(pe)}", batch_id))
 
@@ -473,6 +585,14 @@ class TaskWorker:
             # 显式 429 速率限制：技术重试（与人工重做严格分离，不消耗人工限额）
             logger.warning(f"Task {task_id} Explicit Rate Limited (429): retry {retry_count}/3")
             with get_db(immediate=True) as conn:
+                if image_api_cfg['enabled'] and os.environ.get('WORKBENCH_429_CONFIRMED_UNACCEPTED') != '1':
+                    conn.execute("UPDATE tasks SET status='unknown',last_error='429受理状态未核实',updated_at=datetime('now','localtime') WHERE id=?", (task_id,))
+                    conn.execute("UPDATE slot_versions SET process_status='unknown_pending_confirmation',is_unknown=1,error_message='429受理状态未核实' WHERE id=?", (slot_version_id,))
+                    if ledger_id:
+                        hold_budget_unknown(conn, batch_id, ledger_id, reason='429受理状态未核实')
+                    conn.execute("""UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING',
+                        updated_at=datetime('now','localtime') WHERE id=? AND status='active' AND is_circuit_broken=0""", (batch_id,))
+                    return
                 conn.execute("UPDATE slots SET technical_retry_count = technical_retry_count + 1 WHERE id = ?", (slot_id,))
                 # 记录一次技术重试消耗流水
                 retry_log_id = f"bgt_retry_{uuid.uuid4().hex[:8]}"
@@ -482,18 +602,20 @@ class TaskWorker:
                 """, (retry_log_id, batch_id, task_id))
 
                 if retry_count < 3:
-                    conn.execute("UPDATE tasks SET status = 'queued', retry_count = retry_count + 1, last_error = ? WHERE id = ?", (str(rle), task_id))
+                    delay = _rate_limit_delay(rle, retry_count)
+                    conn.execute("UPDATE tasks SET status = 'queued', retry_count = retry_count + 1, retry_after=datetime('now','localtime',?), last_error = ? WHERE id = ?", (f'+{delay} seconds', str(rle), task_id))
                     conn.execute("UPDATE slot_versions SET process_status = 'pending', error_message = ? WHERE id = ?", (f"Retrying: {str(rle)}", slot_version_id))
                 else:
                     conn.execute("UPDATE tasks SET status = 'failed', last_error = 'Rate limit retry limit exceeded' WHERE id = ?", (task_id,))
                     conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = 'Max technical retries reached' WHERE id = ?", (slot_version_id,))
-                    conn.execute("UPDATE slots SET status = 'empty' WHERE id = ?", (slot_id,))
+                    conn.execute("UPDATE slots SET status = 'empty' WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                     if ledger_id:
                         # 429 表示上游明确拒绝受理，未产生生图消耗 → 释放预占，防止幽灵占用额度
                         release_budget_failed(conn, batch_id, ledger_id, reason="Rate limit retry limit exceeded")
                     conn.execute("""
                         UPDATE batches
-                        SET is_circuit_broken = 1, circuit_break_reason = 'Upstream 429 Rate Limit Exhausted', status = 'paused', pause_reason = 'CIRCUIT_BROKEN'
+                        SET is_circuit_broken = 1, circuit_break_reason = 'Upstream 429 Rate Limit Exhausted',
+                            pause_reason = CASE WHEN status='active' THEN 'CIRCUIT_BROKEN' ELSE pause_reason END, status = 'paused'
                         WHERE id = ?
                     """, (batch_id,))
 
@@ -508,14 +630,19 @@ class TaskWorker:
                 has_file = (RAW_IMAGES_DIR / (stem+'_raw.png')).exists() or (PREVIEW_IMAGES_DIR / (stem+'_preview.jpg')).exists()
                 auto = bool(setting and setting['auto_release_unknown'] and isinstance(unk_err,(ImageRequestTimeout,ImageRequestServerError)) and not raw_generated and not raw_name and not preview_name and not has_file and current and current['status']=='running' and not current['raw_image_path'] and not current['preview_image_path'] and current['design_status'] not in ('archived','eliminated') and ledger and ledger['status']=='reserved')
                 if auto:
-                    conn.execute("UPDATE tasks SET status='failed',last_error=?,updated_at=datetime('now','localtime') WHERE id=?", (str(unk_err),task_id))
+                    conn.execute("UPDATE tasks SET status='failed',failure_stage='request_charge_unknown',last_error=?,updated_at=datetime('now','localtime') WHERE id=?", (str(unk_err),task_id))
                     conn.execute("UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message=? WHERE id=?", (str(unk_err),slot_version_id))
                     if current['current_version_id']==slot_version_id:
                         conn.execute("UPDATE slots SET status='empty',updated_at=datetime('now','localtime') WHERE id=?",(slot_id,))
                     release_budget_failed(conn,batch_id,ledger_id,reason='上游扣费未知，按已接受风险自动释放')
                     conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'auto_release_unknown','system','system',?)",(f'aud_{uuid.uuid4().hex}',batch_id,json.dumps({'task_id':task_id,'design_code':design_code,'error_type':type(unk_err).__name__,'error':str(unk_err),'ledger_id':ledger_id,'reserved_released':ledger['delta_reserved'],'upstream_charge':'unknown'},ensure_ascii=False)))
                     return
-                conn.execute("UPDATE tasks SET status = 'unknown', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(unk_err), task_id))
+                result_failure = isinstance(unk_err, (ImageResultDownloadError, PreviewRecoveryError)) and not (
+                    isinstance(unk_err, PreviewRecoveryError) and unk_err.storage_error)
+                if isinstance(unk_err, PreviewRecoveryError):
+                    conn.execute("UPDATE slot_versions SET raw_image_path=? WHERE id=?",
+                                 (unk_err.raw_filename, slot_version_id))
+                conn.execute("UPDATE tasks SET status = 'unknown', failure_stage=?, last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", ('result_download' if result_failure else 'unknown', str(unk_err), task_id))
                 conn.execute("""
                     UPDATE slot_versions 
                     SET process_status = 'unknown_pending_confirmation', is_unknown = 1, error_message = ?
@@ -523,11 +650,17 @@ class TaskWorker:
                 """, (str(unk_err), slot_version_id))
                 if ledger_id:
                     hold_budget_unknown(conn, batch_id, ledger_id, reason=str(unk_err))
-                conn.execute("""
-                    UPDATE batches 
-                    SET status = 'paused', pause_reason = 'PAUSE_UNKNOWN_PENDING', updated_at = datetime('now', 'localtime')
-                    WHERE id = ?
-                """, (batch_id,))
+                if result_failure:
+                    count = conn.execute("""SELECT COUNT(DISTINCT design_id) FROM tasks
+                        WHERE batch_id=? AND status='unknown' AND failure_stage='result_download'""", (batch_id,)).fetchone()[0]
+                    if count >= 2:
+                        conn.execute("""UPDATE batches SET status='paused',pause_reason='PAUSE_RESULT_DOWNLOAD',
+                            updated_at=datetime('now','localtime')
+                            WHERE id=? AND status='active' AND is_circuit_broken=0""", (batch_id,))
+                else:
+                    conn.execute("""UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING',
+                        updated_at=datetime('now','localtime')
+                        WHERE id=? AND status='active' AND is_circuit_broken=0""", (batch_id,))
 
         except OSError as ose:
             # 磁盘故障：记录错误并熔断批次
@@ -535,12 +668,13 @@ class TaskWorker:
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(ose), task_id))
                 conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (str(ose), slot_version_id))
-                conn.execute("UPDATE slots SET status = 'empty' WHERE id = ?", (slot_id,))
+                conn.execute("UPDATE slots SET status = 'empty' WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                 if ledger_id:
                     hold_budget_unknown(conn, batch_id, ledger_id, reason="Disk full error, holding budget for inspection")
                 conn.execute("""
                     UPDATE batches 
-                    SET is_circuit_broken = 1, circuit_break_reason = 'Storage disk full or critical OS error', status = 'paused', pause_reason = 'CIRCUIT_BROKEN'
+                    SET is_circuit_broken = 1, circuit_break_reason = 'Storage disk full or critical OS error',
+                        pause_reason = CASE WHEN status='active' THEN 'CIRCUIT_BROKEN' ELSE pause_reason END, status = 'paused'
                     WHERE id = ?
                 """, (batch_id,))
 
@@ -551,7 +685,7 @@ class TaskWorker:
                 with get_db(immediate=True) as conn:
                     conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(e), task_id))
                     conn.execute("UPDATE slot_versions SET process_status = 'failed', raw_image_path = ?, error_message = ? WHERE id = ?", (raw_name, f"Post-processing failed: {str(e)}", slot_version_id))
-                    conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ?", (slot_id,))
+                    conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                     if ledger_id:
                         # 结算真实消耗，绝不释放
                         settle_budget_success(conn, batch_id, ledger_id, task_id)
@@ -564,7 +698,7 @@ class TaskWorker:
                     with get_db(immediate=True) as conn:
                         conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (err_str, task_id))
                         conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (err_str, slot_version_id))
-                        conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ?", (slot_id,))
+                        conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                         if ledger_id:
                             release_budget_failed(conn, batch_id, ledger_id, reason=f"misconfig: {err_str}")
                 elif isinstance(e, ValueError) and "Policy Violation" in err_str:
@@ -572,7 +706,7 @@ class TaskWorker:
                     with get_db(immediate=True) as conn:
                         conn.execute("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (err_str, task_id))
                         conn.execute("UPDATE slot_versions SET process_status = 'failed', error_message = ? WHERE id = ?", (err_str, slot_version_id))
-                        conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ?", (slot_id,))
+                        conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                         if ledger_id:
                             release_budget_failed(conn, batch_id, ledger_id, reason="Policy rejected")
                 else:
@@ -585,7 +719,8 @@ class TaskWorker:
                             hold_budget_unknown(conn, batch_id, ledger_id, reason=f"Unhandled error: {err_str}")
                         conn.execute("""
                             UPDATE batches 
-                            SET status = 'paused', pause_reason = 'PAUSE_UNKNOWN_PENDING', updated_at = datetime('now', 'localtime')
+                            SET pause_reason = CASE WHEN status='active' THEN 'PAUSE_UNKNOWN_PENDING' ELSE pause_reason END,
+                                status = 'paused', updated_at = datetime('now', 'localtime')
                             WHERE id = ?
                         """, (batch_id,))
 
