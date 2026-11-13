@@ -1702,6 +1702,9 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
   const curVer = slot.current_version;
   const isInvalidated = curVer && curVer.is_invalidated;
   const isGenerating = slot.status === 'generating';
+  const white = design.slots?.white_isolated;
+  const waitingWhite = ['twin_bed','nightstand_closeup'].includes(slot.slot_type) && curVer?.process_status === 'pending' && white?.current_version?.process_status !== 'completed';
+  const whiteFailed = white?.current_version?.process_status === 'failed';
 
   let imgArea = '';
   if (curVer && curVer.preview_image_path) {
@@ -1733,7 +1736,11 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
     imgArea = `
       <div class="w-full aspect-square bg-slate-50 border border-dashed border-slate-200 rounded-xl flex flex-col items-center justify-center text-inkMuted text-xs">
         ${
-          isGenerating
+          waitingWhite
+          ? (whiteFailed ? '等待白底图重做成功' : '等待白底图完成')
+          : isGenerating && curVer?.process_status === 'pending'
+          ? '排队等待生成'
+          : isGenerating
           ? `<svg class="w-5 h-5 animate-spin text-primary-500 mb-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>生成中...`
           : `未启动生成`
         }

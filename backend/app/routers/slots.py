@@ -154,6 +154,16 @@ def redo_slot(
 
         conn.execute("UPDATE slots SET status = 'generating', current_version_id = ? WHERE id = ?", (new_vid, slot_id))
 
+        if slot_type == 'white_isolated':
+            old_version = conn.execute('SELECT process_status FROM slot_versions WHERE id=? AND slot_id=?', (curr_vid, slot_id)).fetchone()
+            if old_version and old_version['process_status'] == 'failed':
+                conn.execute("""UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id',?)
+                    WHERE design_id=? AND process_status='pending' AND json_valid(prompt_metadata)
+                    AND json_extract(prompt_metadata,'$.reference_version_id')=?
+                    AND slot_id IN (SELECT id FROM slots WHERE design_id=? AND slot_type IN ('twin_bed','nightstand_closeup'))
+                    AND EXISTS (SELECT 1 FROM tasks t WHERE t.slot_version_id=slot_versions.id AND t.status='queued')""",
+                    (new_vid,design_id,curr_vid,design_id))
+
         # 记录审核
         conn.execute("""
             INSERT INTO reviews (id, design_id, slot_id, slot_version_id, review_stage, action, reason_category, detail_comment, reviewer_name, reviewer_role)
