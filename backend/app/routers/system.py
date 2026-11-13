@@ -12,12 +12,51 @@ from ..watermark_service import ensure_watermark_config_schema, watermark_config
 from ..models import WatermarkConfigRequest, CleanupRunRequest, UnknownTaskResolveRequest, SeriesCreateRequest, SeriesGenerateRequest, ImageApiConfigRequest, TextApiConfigRequest
 from ..security import UserContext, get_current_user, require_roles
 from ..cleanup_service import run_protected_cleanup
-from ..budget_service import resolve_unknown_budget
+from ..budget_service import resolve_unknown_budget, release_budget_failed
 from ..series_rules_service import get_configured_series_rules, update_series_rule as apply_series_rule_update, create_series_rule as apply_series_rule_create
 from ..image_adapter import load_image_api_config, load_text_api_config, test_connection as test_image_api_connection, chat_completion_real
 from ..llm_planning_service import parse_llm_rules, build_series_schema_system_prompt
 
 router = APIRouter(prefix="/api/system", tags=["System"])
+
+class RiskReleaseRequest(BaseModel):
+    task_id: str
+    accept_unknown_charge: bool
+
+
+@router.post('/release_unknown_risk')
+def release_unknown_risk(req: RiskReleaseRequest, user: UserContext = Depends(require_roles(['admin']))):
+    if not req.accept_unknown_charge:
+        raise HTTPException(400, '必须明确接受上游扣费未知的风险')
+    with get_db(immediate=True) as conn:
+        row = conn.execute("""SELECT t.*,sv.process_status,sv.raw_image_path,sv.preview_image_path,sv.version_num,
+            s.current_version_id,s.slot_type,d.design_code,d.status AS design_status
+            FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id JOIN slots s ON s.id=t.slot_id
+            JOIN designs d ON d.id=t.design_id WHERE t.id=?""", (req.task_id,)).fetchone()
+        if not row or row['status'] != 'unknown' or row['process_status'] != 'unknown_pending_confirmation':
+            raise HTTPException(409, '任务不存在或已不处于待确认状态')
+        err = row['last_error'] or ''
+        if not (err.startswith('生图上游超时:') or err.startswith('生图上游服务端错误 HTTP 5')):
+            raise HTTPException(409, '该未知结果不属于请求超时或上游 5xx')
+        stem = f"{row['design_code']}_{row['slot_type']}_v{row['version_num']}_{row['slot_version_id'][:8]}"
+        if row['raw_image_path'] or row['preview_image_path'] or (RAW_IMAGES_DIR / (stem+'_raw.png')).exists() or (PREVIEW_IMAGES_DIR / (stem+'_preview.jpg')).exists():
+            raise HTTPException(409, '存在图片记录或文件，不能按未知风险释放')
+        ledgers = conn.execute("SELECT id,status,delta_reserved FROM budget_ledger WHERE batch_id=? AND reference_task_id=? AND category='image_generation' AND status='unknown_held'", (row['batch_id'],req.task_id)).fetchall()
+        if len(ledgers)!=1:
+            raise HTTPException(409, '账本状态异常，请人工核对')
+        ledger=ledgers[0]
+        conn.execute("UPDATE tasks SET status='failed',updated_at=datetime('now','localtime') WHERE id=?", (req.task_id,))
+        conn.execute("UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message='上游扣费未知，负责人接受风险放行' WHERE id=?", (row['slot_version_id'],))
+        if row['current_version_id']==row['slot_version_id'] and row['design_status'] not in ('archived','eliminated'):
+            conn.execute("UPDATE slots SET status='empty',updated_at=datetime('now','localtime') WHERE id=?", (row['slot_id'],))
+        release_budget_failed(conn,row['batch_id'],ledger['id'],reason='上游扣费未知，负责人接受风险放行')
+        remaining=conn.execute("SELECT count(*) AS n FROM slot_versions sv JOIN designs d ON d.id=sv.design_id WHERE d.batch_id=? AND sv.process_status='unknown_pending_confirmation'",(row['batch_id'],)).fetchone()['n']
+        batch=conn.execute('SELECT status,pause_reason,is_circuit_broken FROM batches WHERE id=?',(row['batch_id'],)).fetchone()
+        resumed=bool(not remaining and batch and batch['status']=='paused' and batch['pause_reason']=='PAUSE_UNKNOWN_PENDING' and not batch['is_circuit_broken'])
+        if resumed:
+            conn.execute("UPDATE batches SET status='active',pause_reason=NULL,updated_at=datetime('now','localtime') WHERE id=?",(row['batch_id'],))
+        conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'risk_release_unknown',?,?,?)",(f'aud_{uuid.uuid4().hex}',row['batch_id'],user.user_id,user.role,json.dumps({'task_id':req.task_id,'error':err,'upstream_charge':'unknown','risk_accepted':True,'ledger_id':ledger['id'],'reserved_released':ledger['delta_reserved'],'resumed':resumed},ensure_ascii=False)))
+    return {'task_id':req.task_id,'resumed':resumed,'upstream_charge':'unknown'}
 
 class SeriesOptionsRequest(BaseModel):
     field: str

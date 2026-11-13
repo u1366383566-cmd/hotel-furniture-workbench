@@ -63,6 +63,11 @@ async function loadWorkbenchSettings() {
     const settings=await apiFetch('/api/workbench/budget-settings');
     document.getElementById('budget-per-warning').value=settings.warning_per_group;
     document.getElementById('budget-per-hard').value=settings.hard_limit_per_group;
+    document.getElementById('auto-release-unknown').checked=settings.auto_release_unknown;
+    const risks=await apiFetch('/api/workbench/risk-releases');
+    document.getElementById('risk-release-count').textContent=risks.count;
+    const list=document.getElementById('risk-release-list'); list.replaceChildren();
+    for(const item of risks.items) { const line=document.createElement('p'); line.textContent=`${item.created_at} · ${item.batch_id || '无任务'} · ${item.action} · ${item.detail}`; list.appendChild(line); }
   } catch(e) { showToast(e.message,true); }
 }
 document.addEventListener('DOMContentLoaded',()=>{
@@ -101,7 +106,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     } catch(e){showToast(e.message,true);}
   });
   document.getElementById('budget-settings-save').addEventListener('click',async()=>{
-    try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value)};
+    try { const body={warning_per_group:Number(document.getElementById('budget-per-warning').value),hard_limit_per_group:Number(document.getElementById('budget-per-hard').value),auto_release_unknown:document.getElementById('auto-release-unknown').checked};
       await apiFetch('/api/workbench/budget-settings',{method:'PUT',body:JSON.stringify(body)}); showToast('新任务默认额度已保存');
     } catch(e){showToast(e.message,true);}
   });

@@ -37,6 +37,7 @@ def client():
         with get_db(immediate=True) as conn:
             conn.execute("DELETE FROM batches")
             conn.execute("UPDATE nas_upload_settings SET auto_enabled=0,test_design_id=NULL WHERE id=1")
+            conn.execute("UPDATE workbench_settings SET warning_per_group=5,hard_limit_per_group=6,auto_release_unknown=0 WHERE id='default'")
             conn.execute("DELETE FROM text_api_configs")
             # 生图上游配置重置为默认禁用，防止上一个用例的真实模式泄漏到后续用例
             conn.execute("""

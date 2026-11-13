@@ -17,6 +17,7 @@ from .budget_service import (
 )
 from .image_adapter import (
     ExplicitRateLimitError, ImageApiMisconfigError,
+    ImageRequestTimeout, ImageRequestServerError,
     generate_image_real, edit_image_real, load_image_api_config,
 )
 
@@ -500,6 +501,20 @@ class TaskWorker:
             # 网络超时或真实连接重置：状态未知，保守计入预算持有，暂停批次防雪崩
             logger.error(f"Task {task_id} Timeout or Connection Reset (Unknown): {unk_err}")
             with get_db(immediate=True) as conn:
+                setting = conn.execute("SELECT auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone()
+                current = conn.execute("SELECT t.status,sv.raw_image_path,sv.preview_image_path,s.current_version_id,d.status AS design_status FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id JOIN slots s ON s.id=t.slot_id JOIN designs d ON d.id=t.design_id WHERE t.id=?", (task_id,)).fetchone()
+                ledger = conn.execute("SELECT id,status,delta_reserved FROM budget_ledger WHERE id=? AND batch_id=? AND reference_task_id=? AND category='image_generation'", (ledger_id,batch_id,task_id)).fetchone() if ledger_id else None
+                stem = f"{design_code}_{slot_type}_v{version_num}_{slot_version_id[:8]}"
+                has_file = (RAW_IMAGES_DIR / (stem+'_raw.png')).exists() or (PREVIEW_IMAGES_DIR / (stem+'_preview.jpg')).exists()
+                auto = bool(setting and setting['auto_release_unknown'] and isinstance(unk_err,(ImageRequestTimeout,ImageRequestServerError)) and not raw_generated and not raw_name and not preview_name and not has_file and current and current['status']=='running' and not current['raw_image_path'] and not current['preview_image_path'] and current['design_status'] not in ('archived','eliminated') and ledger and ledger['status']=='reserved')
+                if auto:
+                    conn.execute("UPDATE tasks SET status='failed',last_error=?,updated_at=datetime('now','localtime') WHERE id=?", (str(unk_err),task_id))
+                    conn.execute("UPDATE slot_versions SET process_status='failed',is_unknown=0,error_message=? WHERE id=?", (str(unk_err),slot_version_id))
+                    if current['current_version_id']==slot_version_id:
+                        conn.execute("UPDATE slots SET status='empty',updated_at=datetime('now','localtime') WHERE id=?",(slot_id,))
+                    release_budget_failed(conn,batch_id,ledger_id,reason='上游扣费未知，按已接受风险自动释放')
+                    conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'auto_release_unknown','system','system',?)",(f'aud_{uuid.uuid4().hex}',batch_id,json.dumps({'task_id':task_id,'design_code':design_code,'error_type':type(unk_err).__name__,'error':str(unk_err),'ledger_id':ledger_id,'reserved_released':ledger['delta_reserved'],'upstream_charge':'unknown'},ensure_ascii=False)))
+                    return
                 conn.execute("UPDATE tasks SET status = 'unknown', last_error = ?, updated_at = datetime('now', 'localtime') WHERE id = ?", (str(unk_err), task_id))
                 conn.execute("""
                     UPDATE slot_versions 

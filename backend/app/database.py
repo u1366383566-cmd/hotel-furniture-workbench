@@ -44,6 +44,7 @@ def _ensure_columns(conn: sqlite3.Connection):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
 
     add_col_if_missing('batches', 'pause_reason', 'TEXT')
+    add_col_if_missing('workbench_settings', 'auto_release_unknown', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'trial_run_remaining', 'INTEGER DEFAULT 0')
     add_col_if_missing('batches', 'trial_mode', 'INTEGER NOT NULL DEFAULT 0')
     add_col_if_missing('batches', 'approved_series_rules_json', 'TEXT')
@@ -339,8 +340,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS workbench_settings (
-            id TEXT PRIMARY KEY, warning_per_group INTEGER NOT NULL DEFAULT 5,
-            hard_limit_per_group INTEGER NOT NULL DEFAULT 6
+            id TEXT PRIMARY KEY, warning_per_group INTEGER NOT NULL DEFAULT 8,
+            hard_limit_per_group INTEGER NOT NULL DEFAULT 10
         );
         INSERT OR IGNORE INTO workbench_settings (id) VALUES ('default');
 

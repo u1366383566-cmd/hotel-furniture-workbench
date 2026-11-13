@@ -106,6 +106,14 @@ def _error_detail_text(response: httpx.Response) -> str:
     return (response.text or "")[:300]
 
 
+class ImageRequestTimeout(TimeoutError):
+    pass
+
+
+class ImageRequestServerError(ConnectionResetError):
+    pass
+
+
 def _classify_response(response: httpx.Response, action: str) -> None:
     """把上游 HTTP 状态映射为工作台故障分类（见模块 docstring）。"""
     if response.status_code in (200, 201):
@@ -118,7 +126,7 @@ def _classify_response(response: httpx.Response, action: str) -> None:
         raise ExplicitRateLimitError(f"HTTP 429: 生图上游限流 ({detail[:200]})")
     if response.status_code >= 500:
         # 服务端内部错误：无法确认请求是否已被受理，保守按未知处理
-        raise ConnectionResetError(f"生图上游服务端错误 HTTP {response.status_code} ({detail[:200]})")
+        raise ImageRequestServerError(f"生图上游服务端错误 HTTP {response.status_code} ({detail[:200]})")
     if any(k in lower for k in POLICY_KEYWORDS):
         raise ValueError(f"HTTP {response.status_code} Content Policy Violation: 内容策略拒绝 ({detail[:200]})")
     raise ValueError(f"HTTP {response.status_code}: {action}请求被拒绝 ({detail[:200]})")
@@ -175,7 +183,7 @@ def edit_image_real(cfg: dict, prompt: str, image_bytes: bytes, filename: str = 
             try:
                 resp = client.post(f"{base}/v1/images/edits", data=form, files=files, headers=headers)
             except httpx.TimeoutException as e:
-                raise TimeoutError(f"生图上游超时: {e}") from e
+                raise ImageRequestTimeout(f"生图上游超时: {e}") from e
             except httpx.TransportError as e:
                 raise ConnectionResetError(f"生图上游连接失败: {e}") from e
             _classify_response(resp, "edits")
@@ -270,7 +278,7 @@ def generate_image_real(cfg: dict, prompt: str) -> tuple[bytes, str]:
             try:
                 resp = client.post(f"{base}/v1/images/generations", json=payload, headers=headers)
             except httpx.TimeoutException as e:
-                raise TimeoutError(f"生图上游超时: {e}") from e
+                raise ImageRequestTimeout(f"生图上游超时: {e}") from e
             except httpx.TransportError as e:
                 raise ConnectionResetError(f"生图上游连接失败: {e}") from e
             _classify_response(resp, "generations")

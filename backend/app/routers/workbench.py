@@ -1,8 +1,10 @@
 """Artist-facing task operations; each selected design commits independently."""
-from typing import Dict, List
+from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 import httpx
+import json
+import uuid
 from datetime import datetime, timezone
 
 from ..database import get_db
@@ -34,8 +36,9 @@ def upstream_quota(user: UserContext = Depends(require_roles(['operator', 'leade
 
 
 class BudgetSettings(BaseModel):
-    warning_per_group: int = Field(5, ge=1, le=100)
-    hard_limit_per_group: int = Field(6, ge=2, le=200)
+    warning_per_group: int = Field(8, ge=1, le=100)
+    hard_limit_per_group: int = Field(10, ge=2, le=200)
+    auto_release_unknown: Optional[bool] = None
 
 
 class PanoramaSelection(BaseModel):
@@ -80,8 +83,8 @@ def statistics(user: UserContext = Depends(require_roles(['operator','leader','a
 @router.get('/budget-settings')
 def budget_settings(user: UserContext = Depends(require_roles(['admin']))):
     with get_db() as conn:
-        r=conn.execute("SELECT warning_per_group,hard_limit_per_group FROM workbench_settings WHERE id='default'").fetchone()
-        return dict(r)
+        r=conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone()
+        return {**dict(r), 'auto_release_unknown': bool(r['auto_release_unknown'])}
 
 
 @router.put('/budget-settings')
@@ -89,8 +92,18 @@ def set_budget_settings(req: BudgetSettings, user: UserContext = Depends(require
     if req.hard_limit_per_group <= req.warning_per_group:
         raise HTTPException(400,'硬上限必须高于预警线')
     with get_db(immediate=True) as conn:
-        conn.execute("UPDATE workbench_settings SET warning_per_group=?,hard_limit_per_group=? WHERE id='default'", (req.warning_per_group,req.hard_limit_per_group))
+        before=dict(conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone())
+        conn.execute("UPDATE workbench_settings SET warning_per_group=?,hard_limit_per_group=?,auto_release_unknown=COALESCE(?,auto_release_unknown) WHERE id='default'", (req.warning_per_group,req.hard_limit_per_group,None if req.auto_release_unknown is None else int(req.auto_release_unknown)))
+        after=dict(conn.execute("SELECT warning_per_group,hard_limit_per_group,auto_release_unknown FROM workbench_settings WHERE id='default'").fetchone())
+        conn.execute("INSERT INTO audit_logs(id,action,actor_name,actor_role,detail) VALUES (?,'update_budget_settings',?,?,?)",(f'aud_{uuid.uuid4().hex}',user.user_id,user.role,json.dumps({'before':before,'after':after},ensure_ascii=False)))
     return {'message':'新任务默认额度已保存'}
+
+
+@router.get('/risk-releases')
+def risk_releases(user: UserContext = Depends(require_roles(['admin']))):
+    with get_db() as conn:
+        rows=conn.execute("SELECT batch_id,action,actor_name,created_at,detail FROM audit_logs WHERE action IN ('auto_release_unknown','risk_release_unknown') ORDER BY created_at DESC,id DESC").fetchall()
+    return {'count':len(rows),'items':[dict(r) for r in rows]}
 
 
 def _error(exc):
