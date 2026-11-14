@@ -14,6 +14,8 @@ const state = {
   designs: [],
   designDetails: new Map(),
   designSummaryEtag: null,
+  designRequestId: 0,
+  budgetRequestId: 0,
   technicalFailures: [],
   exportRecordsBatch: null,
   budget: null,
@@ -72,8 +74,7 @@ async function fetchDesignSummary(batchId) {
     } catch (_) {}
     throw new Error(message);
   }
-  state.designSummaryEtag = response.headers.get('etag');
-  return response.json();
+  return { designs: await response.json(), etag: response.headers.get('etag') };
 }
 
 async function downloadAuthenticatedZip(url, fallbackName) {
@@ -903,6 +904,16 @@ async function loadBatches(selectId = null) {
 
 async function onBatchChanged() {
   const curBatch = state.batches.find(b => b.id === state.currentBatchId);
+  state.designRequestId = (state.designRequestId || 0) + 1;
+  state.budgetRequestId = (state.budgetRequestId || 0) + 1;
+  state.designs = [];
+  state.designSignature = '';
+  for (const id of ['panorama-cards-grid', 'quad-designs-list', 'archived-designs-grid', 'standby-cards-grid']) {
+    document.getElementById(id).replaceChildren();
+  }
+  for (const id of ['metric-archived', 'metric-remaining', 'metric-pending', 'badge-pano-count', 'badge-quad-count', 'badge-standby-count', 'badge-archived-count']) {
+    document.getElementById(id).innerText = '—';
+  }
   document.getElementById('edit-batch-series-panel').classList.add('hidden');
   document.getElementById('edit-batch-series').setAttribute('aria-expanded', 'false');
   panoramaSimilarityCache.clear();
@@ -937,19 +948,20 @@ async function onBatchChanged() {
     legacy_unfrozen: '旧批次缺少批准规则快照，系统禁止静默追加或启动。',
   }[curBatch.approved_rule_snapshot_status] || '规则快照状态未知';
   document.getElementById('rule-snapshot-status').innerText = snapshotText;
-  await loadBudget();
-  await loadDesigns(true);
-  await loadTechnicalFailures();
-  await loadPlanningPanel();
-  await loadWatermarkConfig();
-  await loadAuditLogs();
+  await Promise.allSettled([
+    loadBudget(), loadDesigns(true), loadTechnicalFailures(),
+    loadPlanningPanel(), loadWatermarkConfig(), loadAuditLogs(),
+  ]);
 }
 
 // 加载预算与成本
 async function loadBudget() {
   if (!state.currentBatchId) return;
+  const batchId = state.currentBatchId;
+  const requestId = state.budgetRequestId = (state.budgetRequestId || 0) + 1;
   try {
-    const b = await apiFetch(`/api/batches/${state.currentBatchId}/budget`);
+    const b = await apiFetch(`/api/batches/${batchId}/budget`);
+    if (batchId !== state.currentBatchId || requestId !== state.budgetRequestId) return;
     state.budget = b;
     updateBudgetUI();
   } catch (e) {}
@@ -1007,9 +1019,13 @@ function updateBudgetUI() {
 // 加载设计列表
 async function loadDesigns(forceRender = false) {
   if (!state.currentBatchId) return;
+  const batchId = state.currentBatchId;
+  const requestId = state.designRequestId = (state.designRequestId || 0) + 1;
   try {
-    const designs = await fetchDesignSummary(state.currentBatchId);
-    if (designs === null) return;
+    const result = await fetchDesignSummary(batchId);
+    if (batchId !== state.currentBatchId || requestId !== state.designRequestId || result === null) return;
+    const { designs, etag } = result;
+    state.designSummaryEtag = etag;
     state.designs = designs;
     const liveIds = new Set(designs.map(item => item.id));
     for (const designId of state.designDetails.keys()) {
@@ -2138,8 +2154,10 @@ function renderExportRecords(records) {
 // 加载导出记录（独立刷新入口，不含已导出标记更新）
 async function loadExportRecords() {
   if (!state.currentBatchId) return;
+  const batchId = state.currentBatchId;
   try {
-    const records = await apiFetch(`/api/export/records/${state.currentBatchId}`);
+    const records = await apiFetch(`/api/export/records/${batchId}`);
+    if (batchId !== state.currentBatchId) return;
     renderExportRecords(records);
   } catch (e) {
     state.exportRecordsBatch = null;
@@ -2238,8 +2256,10 @@ async function loadUnknownTasks() {
 // 加载水印配置
 async function loadWatermarkConfig() {
   if (!state.currentBatchId) return;
+  const batchId = state.currentBatchId;
   try {
-    const cfg = await apiFetch(`/api/system/batches/${state.currentBatchId}/watermark`);
+    const cfg = await apiFetch(`/api/system/batches/${batchId}/watermark`);
+    if (batchId !== state.currentBatchId) return;
     document.getElementById('cfg-main-wm').value = cfg.main_text;
     document.getElementById('cfg-repeat-wm').value = cfg.repeat_text;
     document.getElementById('cfg-opacity-wm').value = cfg.opacity;
@@ -2252,8 +2272,10 @@ async function loadWatermarkConfig() {
 // 加载审计日志
 async function loadAuditLogs() {
   if (!state.currentBatchId) return;
+  const batchId = state.currentBatchId;
   try {
-    const logs = await apiFetch(`/api/system/batches/${state.currentBatchId}/audit_logs`);
+    const logs = await apiFetch(`/api/system/batches/${batchId}/audit_logs`);
+    if (batchId !== state.currentBatchId) return;
     const container = document.getElementById('audit-log-container');
     container.innerHTML = '';
     if (logs.length === 0) {
