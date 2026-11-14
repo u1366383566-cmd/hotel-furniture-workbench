@@ -908,6 +908,13 @@ async function onBatchChanged() {
   state.budgetRequestId = (state.budgetRequestId || 0) + 1;
   state.designs = [];
   state.designSignature = '';
+  state.budget = null;
+  state.technicalFailures = [];
+  for (const selection of Object.values(workbenchSelection)) selection.clear();
+  for (const id of ['panorama-bulk', 'quad-bulk', 'export-selection', 'technical-failures-panel', 'planning-job-notice', 'smart-planning-panel', 'bulk-results']) {
+    document.getElementById(id).classList.add('hidden');
+  }
+  document.getElementById('progress-archived').style.width = '0%';
   for (const id of ['panorama-cards-grid', 'quad-designs-list', 'archived-designs-grid', 'standby-cards-grid']) {
     document.getElementById(id).replaceChildren();
   }

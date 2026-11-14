@@ -200,6 +200,40 @@ def run_browser_verification():
             page.wait_for_selector("text=SEEZO 视觉工作台", timeout=10000)
             select_batch(page, main_batch_id)
             page.wait_for_timeout(1200)
+            # Hold an actual A summary response until after switching to B.
+            # The browser executes the production functions and DOM updates.
+            race = page.evaluate('''async ({a, b}) => {
+              const realFetch = window.fetch;
+              let release, started;
+              const held = new Promise(resolve => { release = resolve; });
+              const requested = new Promise(resolve => { started = resolve; });
+              let intercepted = false;
+              window.fetch = async (...args) => {
+                const response = await realFetch(...args);
+                if (!intercepted && String(args[0]).includes(`/batch/${a}/summary`)) {
+                  intercepted = true; started(); await held;
+                }
+                return response;
+              };
+              try {
+                state.designSummaryEtag = null;
+                const oldRequest = loadDesigns(true);
+                await requested;
+                state.currentBatchId = b;
+                await onBatchChanged();
+                const before = state.designs.map(d => d.batch_id);
+                release(); await oldRequest;
+                const after = state.designs.map(d => d.batch_id);
+                return {before, after, selected: state.currentBatchId};
+              } finally {
+                release(); window.fetch = realFetch;
+                state.currentBatchId = a; await onBatchChanged();
+              }
+            }''', {'a': main_batch_id, 'b': manual_batch_id})
+            assert race['selected'] == manual_batch_id, race
+            assert race['before'] and all(x == manual_batch_id for x in race['before']), race
+            assert race['after'] == race['before'], race
+            print('   delayed previous batch response did not replace selected batch.')
             print("1. Homepage loaded successfully.")
             page.screenshot(path=str(EVIDENCE_DIR / "01_homepage_initial.png"))
             stylesheet_ok = page.evaluate("""
