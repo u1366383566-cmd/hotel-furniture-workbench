@@ -61,6 +61,42 @@ class TechnicalRetryRequest(BaseModel):
     accept_unknown_charge: bool = False
 
 
+class WhiteReconcileRequest(BaseModel):
+    design_ids: List[str] = Field(min_length=1, max_length=100)
+
+
+@router.post('/batches/{batch_id}/reconcile-white-versions')
+def reconcile_white_versions(batch_id: str, req: WhiteReconcileRequest, user: UserContext = Depends(require_roles(['operator','leader','admin']))):
+    """Use the completed white version shared by existing dependent images."""
+    results = []
+    for design_id in dict.fromkeys(req.design_ids):
+        try:
+            with get_db(immediate=True) as conn:
+                d = conn.execute('SELECT status FROM designs WHERE id=? AND batch_id=?', (design_id,batch_id)).fetchone()
+                if not d or d['status'] != 'quad_review':
+                    raise ValueError('设计尚未进入四图待终审状态')
+                rows = {r['slot_type']:r for r in conn.execute("""SELECT s.id slot_id,s.slot_type,s.current_version_id,s.status slot_status,sv.id version_id,sv.process_status,sv.raw_image_path,sv.is_invalidated,sv.depends_on_panorama_version_id,sv.prompt_metadata FROM slots s JOIN slot_versions sv ON sv.id=s.current_version_id WHERE s.design_id=? AND s.slot_type IN ('panorama','white_isolated','twin_bed','nightstand_closeup')""", (design_id,)).fetchall()}
+                if set(rows) != {'panorama','white_isolated','twin_bed','nightstand_closeup'}:
+                    raise ValueError('四图槽位不完整')
+                refs = [json.loads(rows[k]['prompt_metadata'] or '{}').get('reference_version_id') for k in ('twin_bed','nightstand_closeup')]
+                if not refs[0] or refs[0] != refs[1]:
+                    raise ValueError('双床和局部图没有共同的白底版本，请逐张核对')
+                old = conn.execute('SELECT sv.*,s.id slot_id FROM slot_versions sv JOIN slots s ON s.id=sv.slot_id WHERE sv.id=? AND sv.design_id=? AND s.slot_type=?', (refs[0],design_id,'white_isolated')).fetchone()
+                if not old or old['process_status'] != 'completed' or old['is_invalidated'] or not old['raw_image_path'] or not (RAW_IMAGES_DIR/old['raw_image_path']).exists() or old['depends_on_panorama_version_id'] != rows['panorama']['version_id']:
+                    raise ValueError('共同对应的旧白底已失效或不可用')
+                if rows['white_isolated']['current_version_id'] == refs[0]:
+                    results.append({'design_id':design_id,'ok':True,'changed':False,'white_version_id':refs[0]})
+                    continue
+                conn.execute("UPDATE slots SET current_version_id=?,status='ready',updated_at=datetime('now','localtime') WHERE id=?", (refs[0],rows['white_isolated']['slot_id']))
+                conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'reconcile_white_version',?,?,?)", (f'aud_{uuid.uuid4().hex}',batch_id,user.user_id,user.role,json.dumps({'design_id':design_id,'old_white_version_id':refs[0],'new_white_version_id':rows['white_isolated']['current_version_id'],'generated_images_reused':True},ensure_ascii=False)))
+                results.append({'design_id':design_id,'ok':True,'changed':True,'white_version_id':refs[0]})
+        except ValueError as exc:
+            results.append({'design_id':design_id,'ok':False,'error':str(exc)})
+        except Exception as exc:
+            results.append({'design_id':design_id,'ok':False,'error':_error(exc)})
+    return {'results':results}
+
+
 @router.post('/batches/{batch_id}/retry-isolated-restarts')
 def retry_isolated_restarts(batch_id: str, req: TechnicalRetryRequest, user: UserContext = Depends(require_roles(['admin']))):
     """Create replacement attempts while retaining the uncertain original charges."""

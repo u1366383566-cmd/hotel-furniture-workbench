@@ -303,14 +303,11 @@ def run_browser_verification():
             assert card.locator('.white-reference-notice').is_visible()
             assert '双床或床头局部图使用的是之前的白底' in card.locator('.white-reference-notice').inner_text()
             assert card.locator('.btn-archive-quad').is_disabled()
-            card.get_by_role('button',name='查看并回选白底版本').click()
-            dialog=page.locator('dialog.prompt-dialog')
-            dialog.wait_for(state='visible')
-            dialog.locator('select').select_option(target['old'])
-            dialog.get_by_role('button',name='回选此版本').click()
+            page.wait_for_selector('#quad-reconcile-white:not(.hidden)')
+            page.locator('#quad-reconcile-white-button').click()
             page.wait_for_function('''arg => state.designs.find(x=>x.id===arg.id)?.slots?.white_isolated?.current_version_id===arg.old''', arg=target, timeout=10000)
             page.wait_for_function('''id => !document.querySelector(`#quad-designs-list > [data-design-id="${id}"] .btn-archive-quad`)?.disabled''', arg=target['id'], timeout=10000)
-            print('   white-version guidance, reselect and archive readiness verified.')
+            print('   batch white-version reconcile and archive readiness verified.')
 
             # 点击“四图合格归档”
             archive_btn = page.locator(".btn-archive-quad").first

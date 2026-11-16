@@ -77,6 +77,23 @@ def test_reselect_previous_white_allows_matching_images_to_archive(client):
     assert archived.status_code==200, archived.text
 
 
+def test_batch_reconcile_white_versions_reuses_existing_images(client):
+    batch_id, design_id = _full_loop_batch(client)
+    for _ in range(3):
+        assert worker_instance.process_next_task()
+    design = client.get(f'/api/designs/{design_id}').json()
+    white = design['slots']['white_isolated']
+    old = white['current_version_id']
+    redone = client.post(f"/api/slots/{white['id']}/redo", json={'slot_id':white['id'],'expected_version_id':old,'reason_category':'结构错误'})
+    assert redone.status_code == 200 and worker_instance.process_next_task()
+    response = client.post(f'/api/workbench/batches/{batch_id}/reconcile-white-versions', json={'design_ids':[design_id]}, headers={'X-User-Role':'operator'})
+    assert response.status_code == 200 and response.json()['results'][0]['ok'], response.text
+    fresh = client.get(f'/api/designs/{design_id}').json()
+    assert fresh['slots']['white_isolated']['current_version_id'] == old
+    with get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM audit_logs WHERE batch_id=? AND action='reconcile_white_version'", (batch_id,)).fetchone()[0] == 1
+
+
 def test_retry_restart_unknown_keeps_original_ledger_and_is_idempotent(client):
     batch_id, design_id = _full_loop_batch(client)
     assert worker_instance.process_next_task()  # white image

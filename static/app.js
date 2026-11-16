@@ -1628,6 +1628,9 @@ function buildQuadVersionSnapshot(design) {
 function openRedoModal(ctx) {
   state.activeRedoContext = ctx;
   const overLimit = (ctx.redoCount >= 2) || (ctx.totalRedo >= 4);
+  const design = state.designs.find(item => item.id === ctx.designId);
+  const slot = Object.values(design?.slots || {}).find(item => item.id === ctx.slotId);
+  const whiteImpact = slot?.slot_type === 'white_isolated' && ['twin_bed','nightstand_closeup'].some(type => design?.slots?.[type]?.current_version?.process_status === 'completed');
   const title = document.getElementById('modal-redo-title');
   if (title) {
     title.innerText = (ctx.type === 'panorama' ? '发起全景重抽' : '发起单张重做') +
@@ -1640,6 +1643,7 @@ function openRedoModal(ctx) {
   }
   document.getElementById('redo-comment').value = '';
   document.getElementById('redo-prompt-box').classList.toggle('hidden', !ctx.editPrompt);
+  document.getElementById('redo-white-impact').classList.toggle('hidden', !whiteImpact);
   document.getElementById('redo-custom-prompt').value = ctx.promptText || '';
   document.getElementById('redo-leader-override').checked = false;
   document.getElementById('modal-redo').classList.remove('hidden');
@@ -1712,7 +1716,33 @@ function renderQuadTab() {
   const container = document.getElementById('quad-designs-list');
 
   const quadDesigns = state.designs.filter(d => !d.is_standby && ['panorama_approved', 'downstream_generating', 'quad_review'].includes(d.status));
+  const reconcileCandidates = quadDesigns.filter(d => {
+    const refs = ['twin_bed', 'nightstand_closeup'].map(type => d.slots?.[type]?.current_version?.prompt_metadata?.reference_version_id);
+    return refs[0] && refs[0] === refs[1] && refs[0] !== d.slots?.white_isolated?.current_version_id;
+  });
+  const reconcileBar = document.getElementById('quad-reconcile-white');
+  const reconcileButton = document.getElementById('quad-reconcile-white-button');
+  reconcileBar.classList.toggle('hidden', reconcileCandidates.length === 0);
+  reconcileButton.textContent = `一键回选匹配白底（${reconcileCandidates.length} 组）`;
+  reconcileButton.onclick = async () => {
+    reconcileButton.disabled = true;
+    try {
+      const result = await apiFetch(`/api/workbench/batches/${state.currentBatchId}/reconcile-white-versions`, {
+        method: 'POST',
+        body: JSON.stringify({design_ids: reconcileCandidates.map(d => d.id)}),
+      });
+      const ok = result.results.filter(item => item.ok).length;
+      const failed = result.results.length - ok;
+      showToast(`已恢复 ${ok} 组四图版本，无需重新生图${failed ? `；${failed} 组需要逐张核对` : ''}`, failed > 0);
+      await loadDesigns(true);
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      reconcileButton.disabled = false;
+    }
+  };
   if (quadDesigns.length === 0) {
+    reconcileBar.classList.add('hidden');
     container.innerHTML = `<div class="wb-card" data-empty-card>${emptyState('暂无进入四图阶段的设计', '需先在全景初筛中通过至少一款设计')}</div>`;
     return;
   }

@@ -269,6 +269,7 @@
       <div id="tab-panel-quad" class="space-y-5 hidden">
         <div class="section-intro"><div><p class="eyebrow">02 / QUAD</p><h2>四图验收</h2><p>对照统一视角与材质，确认一组完整交付图。</p></div></div>
         <div id="quad-bulk" class="bulk-toolbar hidden"><label for="quad-select-all"><input type="checkbox" id="quad-select-all"> 全选待验收</label><span id="quad-selected-count">已选 0 组</span><button id="quad-bulk-archive" class="wb-btn wb-btn-dark">批量验收</button></div>
+        <div id="quad-reconcile-white" class="workbench-notice hidden"><div><strong>可快速恢复归档</strong><p>部分组当前白底已改版，但双床和局部图仍共同对应同一张旧白底。回选该旧白底即可保留现有图片和要求，无需重新生图。</p></div><button id="quad-reconcile-white-button" class="wb-btn wb-btn-soft-blue">一键回选匹配白底</button></div>
         <div class="text-xs text-inkMuted">
           四图终审对照：全景通过后由人工启动下游三图生成；四图就绪后对照终审，合格一键归档，支持单张重做与版本回选。
         </div>
@@ -495,6 +496,7 @@
           <textarea id="redo-comment" aria-label="重做详细说明" rows="3" class="wb-input" placeholder="填写具体的改动指导建议..."></textarea>
         </div>
         <div id="redo-prompt-box" class="hidden"><label for="redo-custom-prompt">本次重做提示词</label><textarea id="redo-custom-prompt" class="wb-input" rows="10" maxlength="12000"></textarea><p>仅用于这次重做，原版本不会改变。</p></div>
+        <div id="redo-white-impact" class="hidden p-2.5 bg-amber-50 border border-amber-100 rounded-xl text-amber-800 leading-relaxed">整套家具白底改写后，双床图和床头局部图仍会引用旧版白底。若继续使用新版白底，需要同步重做这两张配图；也可以保留旧版白底避免额外生成。</div>
         <div id="redo-override-box" class="hidden p-2.5 bg-amber-50 border border-amber-100 rounded-xl">
           <label class="flex items-center gap-2 text-amber-800 font-medium cursor-pointer">
             <input type="checkbox" id="redo-leader-override" aria-label="负责人特批继续重做" class="accent-blue-600">
