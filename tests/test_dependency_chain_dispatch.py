@@ -108,6 +108,25 @@ def test_redo_completed_white_rebinds_unsent_dependent_tasks(client):
     with get_db() as conn:
         assert conn.execute('SELECT process_status FROM slot_versions WHERE id=?', (new,)).fetchone()[0] == 'completed'
 
+
+def test_white_redo_does_not_rebind_previously_sent_retry(client):
+    import json
+    batch_id, design_id = _full_loop_batch(client)
+    assert worker_instance.process_next_task()
+    design = client.get(f'/api/designs/{design_id}').json()
+    white = design['slots']['white_isolated']
+    twin = design['slots']['twin_bed']
+    with get_db(immediate=True) as conn:
+        task = conn.execute('SELECT id FROM tasks WHERE slot_version_id=?', (twin['current_version_id'],)).fetchone()
+        conn.execute("INSERT INTO image_generation_attempts(id,task_id,slot_version_id,attempt_no,outcome) VALUES ('attempt-sent',?,?,1,'retryable_failure')", (task['id'], twin['current_version_id']))
+    result = client.post(f"/api/slots/{white['id']}/redo", json={'slot_id':white['id'], 'expected_version_id':white['current_version_id'], 'reason_category':'结构错误'})
+    assert result.status_code == 200, result.text
+    assert worker_instance.process_next_task()  # new white
+    with get_db() as conn:
+        metadata = conn.execute('SELECT prompt_metadata FROM slot_versions WHERE id=?', (twin['current_version_id'],)).fetchone()[0]
+        assert json.loads(metadata)['reference_version_id'] == white['current_version_id']
+        assert conn.execute('SELECT status FROM tasks WHERE id=?', (task['id'],)).fetchone()[0] == 'queued'
+
 def test_failed_white_redo_unblocks_queued_dependent_versions(client):
     import json
     batch_id, design_id = _full_loop_batch(client)
