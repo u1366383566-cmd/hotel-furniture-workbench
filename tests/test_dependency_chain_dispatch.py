@@ -50,9 +50,31 @@ def test_archive_rejects_white_reference_from_another_version(client):
         conn.execute("UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id','old-white') WHERE id=?", (snapshot['twin_bed'],))
     result = client.post(f'/api/designs/{design_id}/review_quad', json={'action':'archive','expected_slot_versions':snapshot})
     assert result.status_code == 409, result.text
-    assert '白底' in result.json()['detail']
+    assert '双床白底图' in result.json()['detail']
+    assert '回选' in result.json()['detail'] and 'twin_bed' not in result.json()['detail']
     with get_db() as conn:
         assert conn.execute('SELECT status FROM designs WHERE id=?', (design_id,)).fetchone()['status'] != 'archived'
+
+
+def test_reselect_previous_white_allows_matching_images_to_archive(client):
+    batch_id, design_id = _full_loop_batch(client)
+    for _ in range(3): assert worker_instance.process_next_task()
+    design=client.get(f'/api/designs/{design_id}').json()
+    white=design['slots']['white_isolated']
+    old=white['current_version_id']
+    response=client.post(f"/api/slots/{white['id']}/redo",json={'slot_id':white['id'],'expected_version_id':old,'reason_category':'结构错误'})
+    assert response.status_code==200, response.text
+    assert worker_instance.process_next_task()
+    design=client.get(f'/api/designs/{design_id}').json()
+    snapshot={name:slot['current_version_id'] for name,slot in design['slots'].items()}
+    rejected=client.post(f'/api/designs/{design_id}/review_quad',json={'action':'archive','expected_slot_versions':snapshot})
+    assert rejected.status_code==409 and '双床白底图' in rejected.json()['detail']
+    selected=client.post(f"/api/slots/{white['id']}/select_version",json={'slot_id':white['id'],'version_id':old})
+    assert selected.status_code==200, selected.text
+    design=client.get(f'/api/designs/{design_id}').json()
+    snapshot={name:slot['current_version_id'] for name,slot in design['slots'].items()}
+    archived=client.post(f'/api/designs/{design_id}/review_quad',json={'action':'archive','expected_slot_versions':snapshot})
+    assert archived.status_code==200, archived.text
 
 
 def test_retry_restart_unknown_keeps_original_ledger_and_is_idempotent(client):

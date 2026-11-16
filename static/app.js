@@ -1764,6 +1764,7 @@ function renderQuadTab() {
         </div>
       </div>
 
+      ${!whiteMatches ? `<div class="white-reference-notice" role="status"><strong>白底版本需要核对</strong><p>双床或床头局部图使用的是之前的白底组合图。可回选原来的白底；如决定保留新版白底，请分别重做标有提示的配图，完成后再归档。</p><button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${d.id}" data-slot-type="white_isolated">查看并回选白底版本</button></div>` : ''}
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-1">
         ${renderSlotItem(slots.panorama, '1. 场景全景图 (基准)', d, true)}
         ${renderSlotItem(slots.white_isolated, '2. 整套家具白底重组', d, false)}
@@ -1987,7 +1988,7 @@ function renderSlotItem(slot, label, design, isPanorama = false) {
         </div>
         ${historyOptions}
         ${!isPanorama && curVer ? `<button type="button" class="wb-btn wb-btn-ghost prompt-view" data-design-id="${design.id}" data-slot-type="${slot.slot_type}">${slot.history_count > 1 ? '提示词与历史版本' : '查看提示词'}</button>` : ''}
-        ${!isPanorama && ['twin_bed','nightstand_closeup'].includes(slot.slot_type) && (curVer?.prompt_metadata?.reference_version_id || curVer?.prompt_metadata?.reference_panorama_version_id) && design.slots.white_isolated?.current_version_id !== (curVer.prompt_metadata.reference_version_id || curVer.prompt_metadata.reference_panorama_version_id) ? '<p class="text-xs text-amber-700">参考的白底组合图版本与当前版本不同</p>' : ''}
+        ${!isPanorama && ['twin_bed','nightstand_closeup'].includes(slot.slot_type) && curVer?.prompt_metadata?.reference_version_id && design.slots.white_isolated?.current_version_id !== curVer.prompt_metadata.reference_version_id ? '<p class="text-xs text-amber-700">此图使用的是旧版白底；保留新版白底时，请重做此图。</p>' : ''}
       </div>
 
       <div class="pt-1 flex items-center justify-end">

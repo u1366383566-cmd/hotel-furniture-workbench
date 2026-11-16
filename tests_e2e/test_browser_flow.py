@@ -282,6 +282,36 @@ def run_browser_verification():
             page.wait_for_timeout(6000)
             page.screenshot(path=str(EVIDENCE_DIR / "05_quad_slots_generated.png"))
 
+            # Redo the white image after the original dependent images exist.
+            # The UI must explain the mismatch and let an artist reselect the
+            # original white version before archiving the same four images.
+            target = page.evaluate('''async () => {
+              const design = state.designs.find(d => d.status === 'quad_review');
+              if (!design) throw new Error('No complete quad for white-version test');
+              const white = design.slots.white_isolated;
+              const old = white.current_version_id;
+              await apiFetch(`/api/slots/${white.id}/redo`, {method:'POST', body:JSON.stringify({slot_id:white.id,expected_version_id:old,reason_category:'结构错误'})});
+              await loadDesigns(true);
+              return {id:design.id, old};
+            }''')
+            page.wait_for_function('''id => {
+              const d=state.designs.find(x=>x.id===id);
+              return d?.slots?.white_isolated?.current_version?.process_status==='completed';
+            }''', arg=target['id'], timeout=30000)
+            page.evaluate('() => loadDesigns(true)')
+            card=page.locator(f'#quad-designs-list > [data-design-id="{target["id"]}"]')
+            assert card.locator('.white-reference-notice').is_visible()
+            assert '双床或床头局部图使用的是之前的白底' in card.locator('.white-reference-notice').inner_text()
+            assert card.locator('.btn-archive-quad').is_disabled()
+            card.get_by_role('button',name='查看并回选白底版本').click()
+            dialog=page.locator('dialog.prompt-dialog')
+            dialog.wait_for(state='visible')
+            dialog.locator('select').select_option(target['old'])
+            dialog.get_by_role('button',name='回选此版本').click()
+            page.wait_for_function('''arg => state.designs.find(x=>x.id===arg.id)?.slots?.white_isolated?.current_version_id===arg.old''', arg=target, timeout=10000)
+            page.wait_for_function('''id => !document.querySelector(`#quad-designs-list > [data-design-id="${id}"] .btn-archive-quad`)?.disabled''', arg=target['id'], timeout=10000)
+            print('   white-version guidance, reselect and archive readiness verified.')
+
             # 点击“四图合格归档”
             archive_btn = page.locator(".btn-archive-quad").first
             if archive_btn.is_visible() and not archive_btn.is_disabled():

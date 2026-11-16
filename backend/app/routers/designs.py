@@ -881,7 +881,8 @@ def review_quad(
                     metadata = {}
                 reference = metadata.get('reference_version_id')
                 if reference and reference != rows_by_type['white_isolated']['vid']:
-                    raise HTTPException(status_code=409, detail=f"{stype} 参考的白底组合图不是当前版本，请回选对应白底或重新生成配图")
+                    label = '双床白底图' if stype == 'twin_bed' else '床头局部图'
+                    raise HTTPException(status_code=409, detail=f"{label}使用的是旧版白底组合图。请回选该旧版白底，或基于当前白底重新生成对应图片后再归档。")
 
         if design_status != "quad_review":
             raise HTTPException(status_code=400, detail=f"必须在四图就绪 (quad_review) 后才允许终审，当前状态: {design_status}")
