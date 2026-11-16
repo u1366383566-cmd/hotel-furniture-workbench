@@ -156,14 +156,15 @@ def redo_slot(
         conn.execute("UPDATE slots SET status = 'generating', current_version_id = ? WHERE id = ?", (new_vid, slot_id))
 
         if slot_type == 'white_isolated':
-            old_version = conn.execute('SELECT process_status FROM slot_versions WHERE id=? AND slot_id=?', (curr_vid, slot_id)).fetchone()
-            if old_version and old_version['process_status'] == 'failed':
+            if curr_vid:
                 conn.execute("""UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id',?)
                     WHERE design_id=? AND process_status='pending' AND is_invalidated=0
                     AND depends_on_panorama_version_id=? AND json_valid(prompt_metadata)
                     AND json_extract(prompt_metadata,'$.reference_version_id')=?
                     AND id IN (SELECT current_version_id FROM slots WHERE design_id=? AND slot_type IN ('twin_bed','nightstand_closeup'))
-                    AND EXISTS (SELECT 1 FROM tasks t WHERE t.slot_version_id=slot_versions.id AND t.status='queued')""",
+                    AND EXISTS (SELECT 1 FROM tasks t WHERE t.slot_version_id=slot_versions.id AND t.status='queued' AND t.task_type='generate_downstream'
+                        AND t.retry_count=0 AND t.auto_retry_count=0
+                        AND NOT EXISTS (SELECT 1 FROM image_generation_attempts a WHERE a.task_id=t.id))""",
                     (new_vid,design_id,depends_on,curr_vid,design_id))
 
         # 记录审核

@@ -459,6 +459,22 @@ class TaskWorker:
         - 批次无未决 unknown 挂起任务
         - 关联设计未淘汰 (status != 'eliminated')
         """
+        with get_db(immediate=True) as conn:
+            # Older deployments could leave never-sent dependent tasks pointing
+            # at the white image replaced by a redo. Rebind only those tasks;
+            # attempts that have reached the upstream retain their reference.
+            conn.execute("""UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id',
+                (SELECT white.current_version_id FROM slots white WHERE white.design_id=slot_versions.design_id AND white.slot_type='white_isolated'))
+                WHERE process_status='pending' AND is_invalidated=0 AND json_valid(prompt_metadata)
+                AND EXISTS (SELECT 1 FROM slots own JOIN tasks t ON t.slot_version_id=slot_versions.id
+                    JOIN slots white ON white.design_id=own.design_id AND white.slot_type='white_isolated'
+                    JOIN slot_versions wv ON wv.id=white.current_version_id
+                    WHERE own.id=slot_versions.slot_id AND own.current_version_id=slot_versions.id
+                    AND own.slot_type IN ('twin_bed','nightstand_closeup') AND t.status='queued' AND t.task_type='generate_downstream'
+                    AND t.retry_count=0 AND t.auto_retry_count=0
+                    AND NOT EXISTS (SELECT 1 FROM image_generation_attempts a WHERE a.task_id=t.id)
+                    AND wv.is_invalidated=0 AND wv.depends_on_panorama_version_id=slot_versions.depends_on_panorama_version_id
+                    AND json_extract(slot_versions.prompt_metadata,'$.reference_version_id') IS NOT white.current_version_id)""")
         with get_db() as conn:
             blocked = conn.execute("""SELECT t.id,t.slot_version_id,sv.prompt_metadata,
                 sv.depends_on_panorama_version_id,s.slot_type FROM tasks t
@@ -557,6 +573,7 @@ class TaskWorker:
                           JOIN slot_versions sv2 ON sv2.id = json_extract(sv.prompt_metadata, '$.reference_version_id')
                           WHERE s2.design_id = d.id
                             AND s2.slot_type = 'white_isolated'
+                            AND (t.task_type='redo_slot' OR s2.current_version_id = sv2.id)
                             AND sv2.slot_id = s2.id
                             AND sv2.design_id = d.id
                             AND sv2.is_invalidated = 0

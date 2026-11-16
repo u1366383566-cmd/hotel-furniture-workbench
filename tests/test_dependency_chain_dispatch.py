@@ -78,24 +78,35 @@ def test_twin_and_nightstand_wait_for_white_isolated_completion(client):
     assert statuses["twin_bed"] == "queued", statuses
     assert statuses["nightstand_closeup"] == "queued", statuses
 
-    # 模拟白底清单重做完成（成品落盘）→ 双床/床头近景恢复可派发
+    # 模拟白底完成后依赖任务恢复派发。
     with get_db(immediate=True) as conn:
-        conn.execute("""
-            UPDATE tasks SET status = 'completed'
-            WHERE batch_id = ? AND task_type = 'generate_downstream'
-              AND slot_id = (SELECT id FROM slots WHERE design_id = ? AND slot_type = 'white_isolated')
-        """, (batch_id, design_id))
-        conn.execute("""
-            UPDATE slot_versions SET process_status = 'completed',
-                raw_image_path = 'simulated_white_raw.png'
-            WHERE id = (SELECT current_version_id FROM slots
-                        WHERE design_id = ? AND slot_type = 'white_isolated')
-        """, (design_id,))
-
+        conn.execute("UPDATE tasks SET status='completed' WHERE batch_id=? AND task_type='generate_downstream' AND slot_id=(SELECT id FROM slots WHERE design_id=? AND slot_type='white_isolated')", (batch_id, design_id))
+        conn.execute("UPDATE slot_versions SET process_status='completed',raw_image_path='simulated_white_raw.png' WHERE id=(SELECT current_version_id FROM slots WHERE design_id=? AND slot_type='white_isolated')", (design_id,))
     assert worker_instance.process_next_task() is True
-    statuses = _task_statuses(batch_id)
-    assert statuses["twin_bed"] in ("running", "completed"), statuses
+    assert _task_statuses(batch_id)['twin_bed'] in ('running', 'completed')
 
+
+def test_redo_completed_white_rebinds_unsent_dependent_tasks(client):
+    import json
+    batch_id, design_id = _full_loop_batch(client)
+    assert worker_instance.process_next_task()  # initial white image
+    design = client.get(f'/api/designs/{design_id}').json()
+    white = design['slots']['white_isolated']
+    old = white['current_version_id']
+    response = client.post(f"/api/slots/{white['id']}/redo", json={
+        'slot_id': white['id'], 'expected_version_id': old,
+        'reason_category': '结构错误', 'detail_comment': '调整白底',
+    })
+    assert response.status_code == 200, response.text
+    new = response.json()['new_version_id']
+    with get_db() as conn:
+        rows = conn.execute("""SELECT sv.prompt_metadata FROM slots s
+            JOIN slot_versions sv ON sv.id=s.current_version_id
+            WHERE s.design_id=? AND s.slot_type IN ('twin_bed','nightstand_closeup')""", (design_id,)).fetchall()
+        assert len(rows) == 2 and all(json.loads(r[0])['reference_version_id'] == new for r in rows)
+    assert worker_instance.process_next_task()  # new white, not the dependents
+    with get_db() as conn:
+        assert conn.execute('SELECT process_status FROM slot_versions WHERE id=?', (new,)).fetchone()[0] == 'completed'
 
 def test_failed_white_redo_unblocks_queued_dependent_versions(client):
     import json
