@@ -6,6 +6,25 @@ from backend.app.image_adapter import ImageRequestTimeout, ImageRequestServerErr
 import backend.app.task_worker as worker_module
 
 
+def test_restart_unknown_isolation_resumes_other_design_without_releasing(client, monkeypatch):
+    batch=client.post('/api/batches',json={'name':'restart isolation','enabled_series':['modern_business'],'target_archived_count':2,'designs_per_series':2,'standby_designs_per_series':0,'auto_start_panorama':True},headers={'X-User-Role':'leader'}).json()
+    with get_db(immediate=True) as conn:
+        task=conn.execute('SELECT * FROM tasks WHERE batch_id=? ORDER BY id LIMIT 1',(batch['id'],)).fetchone()
+        conn.execute("UPDATE tasks SET status='unknown',last_error='Interrupted by restart, unverified upstream state' WHERE id=?",(task['id'],))
+        conn.execute("UPDATE slot_versions SET process_status='unknown_pending_confirmation',is_unknown=1 WHERE id=?",(task['slot_version_id'],))
+        conn.execute("UPDATE budget_ledger SET status='unknown_held' WHERE reference_task_id=?",(task['id'],))
+        conn.execute("UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING' WHERE id=?",(batch['id'],))
+    url=f"/api/workbench/batches/{batch['id']}/isolate-restart-unknowns"
+    assert client.post(url,headers={'X-User-Role':'operator'}).status_code==403
+    response=client.post(url,headers={'X-User-Role':'admin'})
+    assert response.status_code==200 and response.json()['isolated']==1
+    assert worker_module.worker_instance.process_next_task()
+    with get_db() as conn:
+        assert conn.execute('SELECT status FROM budget_ledger WHERE reference_task_id=?',(task['id'],)).fetchone()[0]=='unknown_held'
+        assert conn.execute('SELECT status FROM tasks WHERE id=?',(task['id'],)).fetchone()[0]=='unknown'
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE batch_id=? AND status='completed'",(batch['id'],)).fetchone()[0]==1
+
+
 def make_task(client, monkeypatch, error, enabled):
     batch=client.post('/api/batches',json={'name':'risk test','enabled_series':['modern_business'],'target_archived_count':1,'designs_per_series':1,'standby_designs_per_series':0,'auto_start_panorama':True},headers={'X-User-Role':'leader'}).json()
     with get_db(immediate=True) as conn:

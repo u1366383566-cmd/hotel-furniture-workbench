@@ -40,6 +40,21 @@ def _task_statuses(batch_id):
     return {r["slot_type"]: r["status"] for r in rows}
 
 
+def test_archive_rejects_white_reference_from_another_version(client):
+    batch_id, design_id = _full_loop_batch(client)
+    for _ in range(3):
+        assert worker_instance.process_next_task()
+    design = client.get(f'/api/designs/{design_id}').json()
+    snapshot = {name: slot['current_version_id'] for name, slot in design['slots'].items()}
+    with get_db(immediate=True) as conn:
+        conn.execute("UPDATE slot_versions SET prompt_metadata=json_set(prompt_metadata,'$.reference_version_id','old-white') WHERE id=?", (snapshot['twin_bed'],))
+    result = client.post(f'/api/designs/{design_id}/review_quad', json={'action':'archive','expected_slot_versions':snapshot})
+    assert result.status_code == 409, result.text
+    assert '白底' in result.json()['detail']
+    with get_db() as conn:
+        assert conn.execute('SELECT status FROM designs WHERE id=?', (design_id,)).fetchone()['status'] != 'archived'
+
+
 def test_twin_and_nightstand_wait_for_white_isolated_completion(client):
     batch_id, design_id = _full_loop_batch(client)
 

@@ -836,7 +836,7 @@ def review_quad(
             SELECT s.id as slot_id, s.slot_type, s.status as slot_status,
                    sv.id as vid, sv.slot_id as version_slot_id, sv.process_status,
                    sv.is_unknown, sv.is_invalidated, sv.raw_image_path, sv.preview_image_path,
-                   sv.depends_on_panorama_version_id
+                   sv.depends_on_panorama_version_id, sv.prompt_metadata
             FROM slots s
             LEFT JOIN slot_versions sv ON s.current_version_id = sv.id
             WHERE s.design_id = ?
@@ -872,6 +872,16 @@ def review_quad(
                     status_code=400,
                     detail=f"槽位 {stype} 依赖的全景版本 ({row['depends_on_panorama_version_id']}) 与当前全景 ({active_pano_vid}) 不匹配，禁止终审！"
                 )
+
+        if req.action == 'archive':
+            for stype in ('twin_bed', 'nightstand_closeup'):
+                try:
+                    metadata = json.loads(rows_by_type[stype]['prompt_metadata'] or '{}')
+                except (ValueError, TypeError):
+                    metadata = {}
+                reference = metadata.get('reference_version_id')
+                if reference and reference != rows_by_type['white_isolated']['vid']:
+                    raise HTTPException(status_code=409, detail=f"{stype} 参考的白底组合图不是当前版本，请回选对应白底或重新生成配图")
 
         if design_status != "quad_review":
             raise HTTPException(status_code=400, detail=f"必须在四图就绪 (quad_review) 后才允许终审，当前状态: {design_status}")

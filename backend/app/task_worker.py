@@ -545,7 +545,7 @@ class TaskWorker:
                       JOIN designs d2 ON sv2.design_id = d2.id
                       JOIN tasks t2 ON t2.slot_version_id=sv2.id
                       WHERE d2.batch_id = t.batch_id AND sv2.process_status = 'unknown_pending_confirmation'
-                        AND (t2.failure_stage IS NULL OR t2.failure_stage != 'result_download' OR d2.id = d.id)
+                         AND (t2.failure_stage IS NULL OR t2.failure_stage NOT IN ('result_download','restart_isolated') OR d2.id = d.id)
                   )
                   -- 白底依赖链顺序保险：双床/床头近景以白底清单图（white_isolated 当前版本）为
                   -- 以图生图参考，其成品未落盘前不领取，防止拿错参考图或空参考退化。

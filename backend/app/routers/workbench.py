@@ -61,6 +61,28 @@ class TechnicalRetryRequest(BaseModel):
     accept_unknown_charge: bool = False
 
 
+@router.post('/batches/{batch_id}/isolate-restart-unknowns')
+def isolate_restart_unknowns(batch_id: str, user: UserContext = Depends(require_roles(['admin']))):
+    """Resume other designs without releasing or resending interrupted requests."""
+    with get_db(immediate=True) as conn:
+        batch = conn.execute('SELECT status,pause_reason,is_circuit_broken FROM batches WHERE id=?', (batch_id,)).fetchone()
+        if not batch or batch['status'] != 'paused' or batch['pause_reason'] != 'PAUSE_UNKNOWN_PENDING' or batch['is_circuit_broken']:
+            raise HTTPException(409, '任务不是因未知结果暂停，无法自动隔离恢复')
+        unknown = conn.execute("""SELECT t.id,t.design_id,t.last_error,sv.process_status,sv.is_unknown
+            FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id
+            WHERE t.batch_id=? AND (t.status='unknown' OR sv.is_unknown=1 OR sv.process_status='unknown_pending_confirmation')""", (batch_id,)).fetchall()
+        if not unknown or any(r['last_error'] != 'Interrupted by restart, unverified upstream state' or r['process_status'] != 'unknown_pending_confirmation' for r in unknown):
+            raise HTTPException(409, '存在其他未知结果，不能通过重启隔离恢复')
+        for row in unknown:
+            ledgers = conn.execute("SELECT status FROM budget_ledger WHERE reference_task_id=? AND category='image_generation' AND status='unknown_held'", (row['id'],)).fetchall()
+            if len(ledgers) != 1:
+                raise HTTPException(409, '未知任务账本异常，需先核对')
+        conn.executemany("UPDATE tasks SET failure_stage='restart_isolated' WHERE id=? AND status='unknown'", [(r['id'],) for r in unknown])
+        conn.execute("UPDATE batches SET status='active',pause_reason=NULL,updated_at=datetime('now','localtime') WHERE id=? AND status='paused' AND pause_reason='PAUSE_UNKNOWN_PENDING'", (batch_id,))
+        conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'isolate_restart_unknowns',?,?,?)", (f'aud_{uuid.uuid4().hex}', batch_id, user.user_id, user.role, json.dumps({'task_ids':[r['id'] for r in unknown], 'ledger':'unknown_held', 'resent':False},ensure_ascii=False)))
+    return {'isolated':len(unknown),'resumed':True}
+
+
 @router.get('/statistics')
 def statistics(user: UserContext = Depends(require_roles(['operator','leader','admin']))):
     """Return workbench stage statistics with explicit, non-overlapping semantics."""

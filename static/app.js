@@ -1728,10 +1728,16 @@ function renderQuadTab() {
     const nSlot = slots.nightstand_closeup;
 
     const hasDownstreamStarted = d.status !== 'panorama_approved';
-    const allSlotsReady = [pSlot, wSlot, tSlot, nSlot].every(s => s && (s.status === 'ready' || s.status === 'approved'));
+    const whiteMatches = [tSlot, nSlot].every(s => {
+      const reference = s?.current_version?.prompt_metadata?.reference_version_id;
+      return !reference || reference === wSlot?.current_version_id;
+    });
+    const allSlotsReady = whiteMatches && [pSlot, wSlot, tSlot, nSlot].every(s => s && (s.status === 'ready' || s.status === 'approved'));
 
-    const statusBadge = d.status === 'quad_review'
+    const statusBadge = d.status === 'quad_review' && allSlotsReady
       ? '<span class="wb-badge wb-badge-violet">四图就绪 · 待终审</span>'
+      : d.status === 'quad_review'
+        ? '<span class="wb-badge wb-badge-amber">图片生成或版本待核对</span>'
       : (d.status === 'downstream_generating'
         ? '<span class="wb-badge wb-badge-blue"><span class="dot-pulse"></span>下游生成中</span>'
         : '<span class="wb-badge wb-badge-slate">已过全景 · 等待启动下游</span>');
