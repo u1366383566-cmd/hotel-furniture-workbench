@@ -55,6 +55,31 @@ def test_archive_rejects_white_reference_from_another_version(client):
         assert conn.execute('SELECT status FROM designs WHERE id=?', (design_id,)).fetchone()['status'] != 'archived'
 
 
+def test_retry_restart_unknown_keeps_original_ledger_and_is_idempotent(client):
+    batch_id, design_id = _full_loop_batch(client)
+    assert worker_instance.process_next_task()  # white image
+    with get_db(immediate=True) as conn:
+        tasks=conn.execute("SELECT t.id,t.slot_version_id FROM tasks t JOIN slots s ON s.id=t.slot_id WHERE t.design_id=? AND s.slot_type IN ('twin_bed','nightstand_closeup')", (design_id,)).fetchall()
+        for task in tasks:
+            conn.execute("UPDATE tasks SET status='unknown',failure_stage='restart_isolated' WHERE id=?",(task['id'],))
+            conn.execute("UPDATE slot_versions SET process_status='unknown_pending_confirmation',is_unknown=1 WHERE id=?",(task['slot_version_id'],))
+            conn.execute("UPDATE budget_ledger SET status='unknown_held' WHERE reference_task_id=?",(task['id'],))
+    url=f'/api/workbench/batches/{batch_id}/retry-isolated-restarts'
+    body={'task_ids':[t['id'] for t in tasks], 'accept_unknown_charge':True}
+    assert client.post(url,json=body,headers={'X-User-Role':'operator'}).status_code==403
+    assert client.post(url,json={**body,'accept_unknown_charge':False},headers={'X-User-Role':'admin'}).status_code==400
+    result=client.post(url,json=body,headers={'X-User-Role':'admin'})
+    assert result.status_code==200, result.text
+    assert len(result.json()['results'])==2
+    assert client.post(url,json=body,headers={'X-User-Role':'admin'}).status_code==409
+    for _ in range(2): assert worker_instance.process_next_task()
+    with get_db() as conn:
+        for task in tasks:
+            assert conn.execute('SELECT status FROM budget_ledger WHERE reference_task_id=?',(task['id'],)).fetchone()[0]=='unknown_held'
+            assert conn.execute('SELECT status FROM tasks WHERE id=?',(task['id'],)).fetchone()[0]=='superseded_unknown'
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE design_id=? AND task_type='redo_slot' AND status='completed'",(design_id,)).fetchone()[0]==2
+
+
 def test_twin_and_nightstand_wait_for_white_isolated_completion(client):
     batch_id, design_id = _full_loop_batch(client)
 

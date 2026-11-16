@@ -2207,9 +2207,9 @@ async function loadUnknownTasks() {
             <span class="w-2 h-2 rounded-full bg-violet-500 dot-pulse shrink-0"></span>
             <span class="font-bold text-inkTitle text-xs">${t.design_code} · 槽位: ${t.slot_type}</span>
           </div>
-          <div class="text-[11px] text-inkMuted mt-0.5 font-mono">unknown_pending_confirmation | 异常: ${t.error_message || '上游超时/断连'}</div>
+          <div class="text-[11px] text-inkMuted mt-0.5 font-mono">${t.task_status === 'superseded_unknown' ? '已重发；原请求费用仍待核账' : 'unknown_pending_confirmation'} | 异常: ${escapeText(t.error_message || '上游超时/断连')}</div>
         </div>
-        <div class="flex items-center gap-2 flex-wrap shrink-0">
+        ${t.task_status === 'superseded_unknown' ? '' : `<div class="flex items-center gap-2 flex-wrap shrink-0">
           <input aria-label="账单或流水凭据编号" class="unknown-billing-ref wb-input w-44" placeholder="账单/流水凭据编号">
           <label class="flex items-center gap-1 text-xs text-inkBody cursor-pointer"><input type="checkbox" aria-label="确认已核账且无扣费" class="unknown-attest accent-blue-600 mr-1">已核账无扣费</label>
           <button class="btn-resolve-success wb-btn wb-btn-grad px-2.5 py-1.5" data-tid="${t.task_id}">
@@ -2218,7 +2218,7 @@ async function loadUnknownTasks() {
           <button class="btn-resolve-failure wb-btn wb-btn-danger px-2.5 py-1.5" data-tid="${t.task_id}">
             确认失败并释放额度
           </button>
-        </div>
+        </div>`}
       `;
       container.appendChild(row);
     });

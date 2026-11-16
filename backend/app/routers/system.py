@@ -414,7 +414,7 @@ def get_unknown_tasks(
         cur = conn.cursor()
         cur.execute("""
             SELECT sv.id as version_id, sv.slot_id, sv.design_id, sv.process_status, sv.error_message, sv.created_at,
-                   d.design_code, s.slot_type, t.id as task_id, bl.id as ledger_id
+                   d.design_code, s.slot_type, t.id as task_id, t.status as task_status, bl.id as ledger_id
             FROM slot_versions sv
             JOIN slots s ON sv.slot_id = s.id
             JOIN designs d ON sv.design_id = d.id

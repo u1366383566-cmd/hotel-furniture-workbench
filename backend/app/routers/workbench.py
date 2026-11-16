@@ -61,6 +61,48 @@ class TechnicalRetryRequest(BaseModel):
     accept_unknown_charge: bool = False
 
 
+@router.post('/batches/{batch_id}/retry-isolated-restarts')
+def retry_isolated_restarts(batch_id: str, req: TechnicalRetryRequest, user: UserContext = Depends(require_roles(['admin']))):
+    """Create replacement attempts while retaining the uncertain original charges."""
+    if not req.accept_unknown_charge:
+        raise HTTPException(400, '必须确认上游可能重复计费')
+    task_ids = list(dict.fromkeys(req.task_ids))
+    with get_db(immediate=True) as conn:
+        batch = conn.execute('SELECT status,is_circuit_broken FROM batches WHERE id=?', (batch_id,)).fetchone()
+        if not batch or batch['status'] != 'active' or batch['is_circuit_broken']:
+            raise HTTPException(409, '批次不在可生成状态')
+        results = []
+        for task_id in task_ids:
+            row = conn.execute("""SELECT t.*,s.current_version_id,s.slot_type,d.status design_status,
+                sv.prompt,sv.prompt_metadata,sv.mock_visual_features,sv.depends_on_panorama_version_id,
+                sv.template_version,sv.raw_image_path,sv.preview_image_path,sv.is_invalidated,sv.process_status
+                FROM tasks t JOIN slots s ON s.id=t.slot_id JOIN designs d ON d.id=t.design_id
+                JOIN slot_versions sv ON sv.id=t.slot_version_id WHERE t.id=? AND t.batch_id=?""", (task_id,batch_id)).fetchone()
+            if not row or row['status']!='unknown' or row['process_status']!='unknown_pending_confirmation' or row['failure_stage']!='restart_isolated' or row['current_version_id']!=row['slot_version_id'] or row['design_status'] in ('archived','eliminated') or row['raw_image_path'] or row['preview_image_path'] or row['is_invalidated'] or row['slot_type'] not in ('twin_bed','nightstand_closeup'):
+                raise HTTPException(409, f'任务 {task_id} 已变化或不符合重发条件')
+            ledger = conn.execute("SELECT id FROM budget_ledger WHERE reference_task_id=? AND category='image_generation' AND status='unknown_held'", (task_id,)).fetchall()
+            if len(ledger)!=1:
+                raise HTTPException(409, f'任务 {task_id} 的待核账记录异常')
+            meta=json.loads(row['prompt_metadata'] or '{}')
+            ref=meta.get('reference_version_id')
+            white=conn.execute("SELECT s.current_version_id,sv.process_status,sv.raw_image_path,sv.is_invalidated FROM slots s JOIN slot_versions sv ON sv.id=s.current_version_id WHERE s.design_id=? AND s.slot_type='white_isolated'", (row['design_id'],)).fetchone()
+            if not white or ref!=white['current_version_id'] or white['process_status']!='completed' or not white['raw_image_path'] or white['is_invalidated']:
+                raise HTTPException(409, f'任务 {task_id} 的白底参考已变化或不可用')
+            number=conn.execute('SELECT COALESCE(MAX(version_num),0)+1 FROM slot_versions WHERE slot_id=?', (row['slot_id'],)).fetchone()[0]
+            version_id=f'ver_{uuid.uuid4().hex[:8]}'
+            replacement=f'tsk_{uuid.uuid4().hex[:8]}'
+            reserve_budget(conn,batch_id=batch_id,task_id=replacement,note=f'Replacement for uncertain request {task_id}')
+            conn.execute("""INSERT INTO slot_versions(id,slot_id,design_id,version_num,attempt_num,prompt,prompt_metadata,mock_visual_features,process_status,depends_on_panorama_version_id,template_version)
+                VALUES (?,?,?,?,?,?,?,?, 'pending',?,?)""",(version_id,row['slot_id'],row['design_id'],number,number,row['prompt'],row['prompt_metadata'],row['mock_visual_features'],row['depends_on_panorama_version_id'],row['template_version']))
+            conn.execute("INSERT INTO tasks(id,batch_id,design_id,slot_id,slot_version_id,task_type,status,idempotency_key) VALUES (?,?,?,?,?,'redo_slot','queued',?)",(replacement,batch_id,row['design_id'],row['slot_id'],version_id,f'restart_replacement_{task_id}'))
+            conn.execute("UPDATE tasks SET status='superseded_unknown' WHERE id=?",(task_id,))
+            conn.execute("UPDATE slot_versions SET process_status='superseded_unknown' WHERE id=?",(row['slot_version_id'],))
+            conn.execute("UPDATE slots SET current_version_id=?,status='generating',updated_at=datetime('now','localtime') WHERE id=?",(version_id,row['slot_id']))
+            results.append({'original_task_id':task_id,'replacement_task_id':replacement,'version_id':version_id,'original_ledger_id':ledger[0]['id']})
+        conn.execute("INSERT INTO audit_logs(id,batch_id,action,actor_name,actor_role,detail) VALUES (?,?,'retry_isolated_restarts',?,?,?)",(f'aud_{uuid.uuid4().hex}',batch_id,user.user_id,user.role,json.dumps({'risk_accepted':True,'original_upstream_charge':'unknown','results':results},ensure_ascii=False)))
+    return {'results':results}
+
+
 @router.post('/batches/{batch_id}/isolate-restart-unknowns')
 def isolate_restart_unknowns(batch_id: str, user: UserContext = Depends(require_roles(['admin']))):
     """Resume other designs without releasing or resending interrupted requests."""
@@ -70,7 +112,7 @@ def isolate_restart_unknowns(batch_id: str, user: UserContext = Depends(require_
             raise HTTPException(409, '任务不是因未知结果暂停，无法自动隔离恢复')
         unknown = conn.execute("""SELECT t.id,t.design_id,t.last_error,sv.process_status,sv.is_unknown
             FROM tasks t JOIN slot_versions sv ON sv.id=t.slot_version_id
-            WHERE t.batch_id=? AND (t.status='unknown' OR sv.is_unknown=1 OR sv.process_status='unknown_pending_confirmation')""", (batch_id,)).fetchall()
+            WHERE t.batch_id=? AND t.status != 'superseded_unknown' AND (t.status='unknown' OR sv.is_unknown=1 OR sv.process_status='unknown_pending_confirmation')""", (batch_id,)).fetchall()
         if not unknown or any(r['last_error'] != 'Interrupted by restart, unverified upstream state' or r['process_status'] != 'unknown_pending_confirmation' for r in unknown):
             raise HTTPException(409, '存在其他未知结果，不能通过重启隔离恢复')
         for row in unknown:
