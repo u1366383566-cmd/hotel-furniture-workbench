@@ -35,10 +35,27 @@ def process_next_plan():
     from .routers.smart_planning import generate, ReplanRequest, _design, _candidates
     from .routers.batches import _queue_initial_panorama
     with get_db(immediate=True) as conn:
-        job = conn.execute("""SELECT p.* FROM planning_jobs p JOIN batches b ON b.id=p.batch_id
-            JOIN designs d ON d.id=p.design_id WHERE p.status='queued' AND b.auto_workflow=1
+        job = conn.execute("""SELECT p.*,b.status AS batch_status,b.pause_reason AS batch_pause_reason
+            FROM planning_jobs p JOIN batches b ON b.id=p.batch_id
+            JOIN designs d ON d.id=p.design_id WHERE b.auto_workflow=1
             AND (p.retry_after IS NULL OR p.retry_after <= datetime('now','localtime'))
-            AND b.status='active' AND b.is_circuit_broken=0 AND d.status='draft'
+            AND (
+                (
+                    p.status='queued'
+                    AND (
+                        (b.status='active' AND b.is_circuit_broken=0)
+                        OR (
+                            b.status='paused' AND b.pause_reason='PAUSE_UNKNOWN_PENDING'
+                            AND b.is_circuit_broken=0
+                        )
+                    )
+                )
+                OR (
+                    p.status='ready_to_dispatch'
+                    AND b.status='active' AND b.is_circuit_broken=0
+                )
+            )
+            AND d.status='draft'
             ORDER BY p.created_at,p.id LIMIT 1""").fetchone()
         if not job:
             return False
@@ -78,8 +95,24 @@ def process_next_plan():
                     break
                 replan_count += 1
         with get_db(immediate=True) as conn:
-            row = conn.execute('SELECT d.design_code,d.status,b.status AS batch_status,b.is_circuit_broken FROM designs d JOIN batches b ON b.id=d.batch_id WHERE d.id=?', (job['design_id'],)).fetchone()
-            if not row or row['status'] != 'draft' or row['batch_status'] != 'active' or row['is_circuit_broken']:
+            row = conn.execute(
+                """SELECT d.design_code,d.status,b.status AS batch_status,
+                          b.pause_reason AS batch_pause_reason,b.is_circuit_broken
+                   FROM designs d JOIN batches b ON b.id=d.batch_id WHERE d.id=?""",
+                (job['design_id'],),
+            ).fetchone()
+            if not row or row['status'] != 'draft' or row['is_circuit_broken']:
+                raise ValueError('任务状态已变化，暂不能启动全景')
+            if row['batch_status'] == 'paused' and row['batch_pause_reason'] == 'PAUSE_UNKNOWN_PENDING':
+                conn.execute(
+                    """UPDATE planning_jobs
+                       SET status='ready_to_dispatch',error=?,retry_after=NULL,
+                           updated_at=datetime('now','localtime')
+                       WHERE id=?""",
+                    ('方案已就绪，等待图片任务恢复后自动派发全景', job['id']),
+                )
+                return True
+            if row['batch_status'] != 'active':
                 raise ValueError('任务状态已变化，暂不能启动全景')
             # Another planner can save a similar design between the first
             # similarity check and dispatch. Check again under the dispatch

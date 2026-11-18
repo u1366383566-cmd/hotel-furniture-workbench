@@ -77,6 +77,97 @@ def test_noneligible_or_disabled_stays_unknown(client,monkeypatch,error,enabled)
     assert task['status']=='unknown' and ledger['status']=='unknown_held' and state['pause_reason']=='PAUSE_UNKNOWN_PENDING' and audit is None
 
 
+def test_explicit_http_4xx_is_a_known_failure_not_unknown(client, monkeypatch):
+    batch, task, ledger, state, audit = make_task(
+        client,
+        monkeypatch,
+        ValueError('HTTP 400: generations request rejected (Free quota exhausted, retry in 8 hours)'),
+        False,
+    )
+    assert task['status'] == 'failed'
+    assert task['failure_stage'] == 'request_rejected'
+    assert task['retry_status'] == 'explicit_http_rejection'
+    assert ledger['status'] == 'released'
+    assert state['status'] == 'active' and state['pause_reason'] is None
+    assert audit is None
+
+
+def test_existing_http_4xx_unknown_can_be_resolved_and_requeued_without_billing_attestation(client, monkeypatch):
+    batch, task, ledger, state, audit = make_task(
+        client,
+        monkeypatch,
+        ValueError('HTTP 400: generations request rejected (Free quota exhausted, retry in 8 hours)'),
+        False,
+    )
+    with get_db(immediate=True) as conn:
+        conn.execute(
+            """UPDATE tasks SET status='unknown',failure_stage=NULL,retry_status=NULL,
+               last_error='HTTP 400: generations request rejected (Free quota exhausted, retry in 8 hours)'
+               WHERE id=?""",
+            (task['id'],),
+        )
+        conn.execute(
+            """UPDATE slot_versions
+               SET process_status='unknown_pending_confirmation',is_unknown=1,
+                   error_message='HTTP 400: generations request rejected (Free quota exhausted, retry in 8 hours)'
+               WHERE id=?""",
+            (task['slot_version_id'],),
+        )
+        conn.execute(
+            "UPDATE budget_ledger SET status='unknown_held',delta_reserved=1,delta_used=0 WHERE id=?",
+            (ledger['id'],),
+        )
+        conn.execute(
+            "UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING' WHERE id=?",
+            (batch['id'],),
+        )
+
+    listing = client.get(
+        f"/api/system/batches/{batch['id']}/unknown_tasks",
+        headers={'X-User-Role':'admin'},
+    )
+    assert listing.status_code == 200
+    assert listing.json()[0]['explicit_rejection'] is True
+
+    resolved = client.post(
+        '/api/system/resolve_unknown',
+        headers={'X-User-Role':'admin'},
+        json={'task_id':task['id'],'resolution':'confirm_request_rejected'},
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    failures = client.get(
+        f"/api/workbench/batches/{batch['id']}/technical-failures",
+        headers={'X-User-Role':'admin'},
+    )
+    assert failures.status_code == 200
+    item = failures.json()['items'][0]
+    assert item['retryable'] is True and item['requires_risk_ack'] is False
+
+    retried = client.post(
+        f"/api/workbench/batches/{batch['id']}/retry-technical-failures",
+        headers={'X-User-Role':'admin'},
+        json={'task_ids':[task['id']],'accept_unknown_charge':False},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()['results'][0]['ok'] is True
+    with get_db() as conn:
+        row = conn.execute(
+            'SELECT status,failure_stage,retry_status FROM tasks WHERE id=?',
+            (task['id'],),
+        ).fetchone()
+        batch_after = conn.execute(
+            'SELECT status,pause_reason FROM batches WHERE id=?',
+            (batch['id'],),
+        ).fetchone()
+    assert (row['status'],row['failure_stage'],row['retry_status']) == (
+        'queued',
+        'request_retryable',
+        'manual_retry_queued',
+    )
+    assert (batch_after['status'],batch_after['pause_reason']) == ('active',None)
+
+
 def test_manual_risk_release_requires_explicit_ack_and_is_idempotent(client,monkeypatch):
     batch,task,ledger,state,audit=make_task(client,monkeypatch,ImageRequestTimeout('生图上游超时: timeout'),False)
     url='/api/system/release_unknown_risk'

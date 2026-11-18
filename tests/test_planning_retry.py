@@ -90,6 +90,125 @@ def test_manual_retry_resets_only_technical_backoff(client):
     assert (row['status'], row['technical_retry_count'], row['retry_after'], row['replan_count']) == ('queued', 0, None, 2)
 
 
+def test_manual_planning_retry_is_allowed_while_images_wait_for_unknown(client):
+    response = client.post('/api/batches', headers={'X-User-Role': 'admin'}, json={
+        'name': '未知结果下重试规划', 'enabled_series': ['modern_business'],
+        'target_archived_count': 1, 'smart_planning': True, 'auto_workflow': True,
+        'auto_start_panorama': False,
+        'series_counts': {'modern_business': {'primary': 1, 'standby': 0}},
+    })
+    assert response.status_code == 200, response.text
+    bid = response.json()['id']
+    with get_db(immediate=True) as conn:
+        conn.execute(
+            """UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING'
+               WHERE id=?""",
+            (bid,),
+        )
+        conn.execute(
+            """UPDATE planning_jobs SET status='failed',technical_retry_count=2,
+               retry_after=datetime('now','localtime','+60 seconds')
+               WHERE batch_id=?""",
+            (bid,),
+        )
+
+    retried = client.post(
+        f'/api/workbench/batches/{bid}/retry-planning',
+        headers={'X-User-Role': 'admin'},
+    )
+
+    assert retried.status_code == 200, retried.text
+    with get_db() as conn:
+        row = conn.execute(
+            'SELECT status,technical_retry_count,retry_after FROM planning_jobs WHERE batch_id=?',
+            (bid,),
+        ).fetchone()
+        batch = conn.execute(
+            'SELECT status,pause_reason FROM batches WHERE id=?',
+            (bid,),
+        ).fetchone()
+    assert (row['status'], row['technical_retry_count'], row['retry_after']) == ('queued', 0, None)
+    assert (batch['status'], batch['pause_reason']) == ('paused', 'PAUSE_UNKNOWN_PENDING')
+
+
+def test_planner_prepares_plans_but_defers_panoramas_during_unknown_pause(client, monkeypatch):
+    response = client.post('/api/batches', headers={'X-User-Role': 'admin'}, json={
+        'name': '暂停期间继续规划', 'enabled_series': ['modern_business'],
+        'target_archived_count': 2, 'smart_planning': True, 'auto_workflow': True,
+        'auto_start_panorama': False,
+        'series_counts': {'modern_business': {'primary': 2, 'standby': 0}},
+    })
+    assert response.status_code == 200, response.text
+    bid = response.json()['id']
+    with get_db(immediate=True) as conn:
+        jobs = conn.execute(
+            'SELECT design_id FROM planning_jobs WHERE batch_id=?',
+            (bid,),
+        ).fetchall()
+        conn.execute(
+            """UPDATE batches SET status='paused',pause_reason='PAUSE_UNKNOWN_PENDING'
+               WHERE id=?""",
+            (bid,),
+        )
+
+    calls = []
+
+    def prepare(design_id, *args, **kwargs):
+        calls.append(design_id)
+        with get_db(immediate=True) as conn:
+            conn.execute(
+                "UPDATE designs SET planning_status='ready' WHERE id=?",
+                (design_id,),
+            )
+
+    monkeypatch.setattr(smart_planning, 'generate', prepare)
+    assert process_next_plan()
+    assert process_next_plan()
+
+    with get_db() as conn:
+        job_rows = conn.execute(
+            'SELECT status,error,retry_after FROM planning_jobs WHERE batch_id=?',
+            (bid,),
+        ).fetchall()
+        designs = conn.execute(
+            'SELECT planning_status FROM designs WHERE id IN (?,?)',
+            (jobs[0]['design_id'], jobs[1]['design_id']),
+        ).fetchall()
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE batch_id=? AND task_type='generate_panorama'",
+            (bid,),
+        ).fetchone()['n']
+    assert set(calls) == {job['design_id'] for job in jobs}
+    assert all(design['planning_status'] == 'ready' for design in designs)
+    assert all(
+        (job['status'], job['error'], job['retry_after']) == (
+            'ready_to_dispatch',
+            '方案已就绪，等待图片任务恢复后自动派发全景',
+            None,
+        )
+        for job in job_rows
+    )
+    assert task_count == 0
+
+    with get_db(immediate=True) as conn:
+        conn.execute(
+            "UPDATE batches SET status='active',pause_reason=NULL WHERE id=?",
+            (bid,),
+        )
+    assert process_next_plan()
+    with get_db() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE batch_id=? AND task_type='generate_panorama'",
+            (bid,),
+        ).fetchone()['n']
+        done_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM planning_jobs WHERE batch_id=? AND status='done'",
+            (bid,),
+        ).fetchone()['n']
+    assert task_count == 1
+    assert done_count == 1
+
+
 def test_planner_stop_waits_for_inflight_work(client, monkeypatch):
     import asyncio
     from threading import Event

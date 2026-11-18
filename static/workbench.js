@@ -39,6 +39,10 @@ function showBulkResult(result, retry) {
     row.append(message, button); list.appendChild(row);
   }
 }
+function selectedTechnicalFailuresRequireRisk() {
+  return [...document.querySelectorAll('#technical-failures-list input[data-task-id]:checked')]
+    .some(box => box.dataset.requiresRisk === '1');
+}
 async function refreshWorkbenchInfo() {
   try {
     const s=await apiFetch('/api/workbench/statistics');
@@ -50,11 +54,49 @@ async function refreshWorkbenchInfo() {
     const info=await apiFetch(`/api/workbench/batches/${batch.id}/planning`);
     if (batch.id!==state.currentBatchId) return;
     const pending=info.jobs.filter(j=>['queued','running'].includes(j.status)).length;
+    const waiting=info.jobs.filter(j=>j.status==='ready_to_dispatch').length;
     const failed=info.jobs.filter(j=>j.status==='failed').length;
-    notice.replaceChildren(); notice.classList.toggle('hidden',!pending && !failed);
-    if (pending || failed) {
-      const text=document.createElement('span'); text.textContent=pending ? `正在规划 ${pending} 款，规划完成后自动开始生成全景，无需手动启动${failed ? `；另有 ${failed} 款规划失败，请重试或联系管理员` : ''}` : `${failed} 款规划失败，未启动生图，请重试或联系管理员`; notice.appendChild(text);
-      if(failed) { const button=document.createElement('button'); button.className='wb-btn wb-btn-ghost'; button.textContent='重试未完成方案'; button.onclick=async()=>{try { await apiFetch(`/api/workbench/batches/${batch.id}/retry-planning`,{method:'POST'}); await refreshWorkbenchInfo(); } catch(e) { showToast(e.message,true); }}; notice.appendChild(button); }
+    const unknownPaused=info.batch?.status==='paused'&&info.batch?.pause_reason==='PAUSE_UNKNOWN_PENDING';
+    notice.replaceChildren(); notice.classList.toggle('hidden',!pending && !waiting && !failed);
+    if (pending || waiting || failed) {
+      const text=document.createElement('span');
+      const parts=[];
+      if(pending) parts.push(`正在规划 ${pending} 款`);
+      if(waiting) parts.push(`${waiting} 款方案已就绪，等待图片任务恢复后派发全景`);
+      if(failed) parts.push(`${failed} 款规划失败，请重试`);
+      text.textContent=parts.join('；')+'。';
+      notice.appendChild(text);
+      if(unknownPaused) {
+        const detail=document.createElement('span');
+        detail.className='workbench-notice-detail';
+        detail.textContent=`生图因 ${info.unknown_count} 个未知结果暂停；方案规划仍会继续，恢复图片任务后会自动派发全景。`;
+        notice.appendChild(detail);
+      }
+      if(failed) {
+        const button=document.createElement('button');
+        button.className='wb-btn wb-btn-ghost';
+        button.textContent='重试规划失败项';
+        button.onclick=async()=>{
+          button.disabled=true;
+          try {
+            const result=await apiFetch(`/api/workbench/batches/${batch.id}/retry-planning`,{method:'POST'});
+            showToast(result.queued ? `已重新排队 ${result.queued} 个规划任务` : '没有可重新排队的规划任务');
+            await refreshWorkbenchInfo();
+          } catch(e) {
+            showToast(e.message,true);
+          } finally {
+            button.disabled=false;
+          }
+        };
+        notice.appendChild(button);
+      }
+      if(unknownPaused&&['leader','admin'].includes(state.currentRole)) {
+        const button=document.createElement('button');
+        button.className='wb-btn wb-btn-soft-blue';
+        button.textContent='查看未知结果';
+        button.onclick=()=>document.querySelector('[data-tab="system"]').click();
+        notice.appendChild(button);
+      }
     }
   } catch(e) { console.error('工作台统计加载失败',e); }
 }
@@ -85,7 +127,8 @@ document.addEventListener('DOMContentLoaded',()=>{
     const taskIds = [...document.querySelectorAll('#technical-failures-list input[data-task-id]:checked')]
       .map(box => box.dataset.taskId);
     if (!taskIds.length) return showToast('请选择技术失败项', true);
-    if (!document.getElementById('technical-failures-accept-risk').checked) {
+    const acceptRisk = document.getElementById('technical-failures-accept-risk').checked;
+    if (selectedTechnicalFailuresRequireRisk() && !acceptRisk) {
       return showToast('请先确认上游扣费未知风险', true);
     }
     event.currentTarget.disabled = true;
@@ -93,7 +136,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     try {
       const result = await apiFetch(`/api/workbench/batches/${state.currentBatchId}/retry-technical-failures`, {
         method: 'POST',
-        body: JSON.stringify({task_ids: taskIds, accept_unknown_charge: true}),
+        body: JSON.stringify({task_ids: taskIds, accept_unknown_charge: acceptRisk}),
       });
       const ok = result.results.filter(item => item.ok).length;
       const failed = result.results.length - ok;

@@ -1,5 +1,6 @@
 import json
 import uuid
+import re
 import sqlite3
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -18,6 +19,14 @@ from ..image_adapter import load_image_api_config, load_text_api_config, test_co
 from ..llm_planning_service import parse_llm_rules, build_series_schema_system_prompt
 
 router = APIRouter(prefix="/api/system", tags=["System"])
+
+
+def _is_explicit_request_rejection(error: str | None) -> bool:
+    match = re.match(r"^HTTP\s+([45]\d\d)\b", error or "")
+    if not match:
+        return False
+    status_code = int(match.group(1))
+    return 400 <= status_code < 500 and status_code not in (401, 403, 429)
 
 class RiskReleaseRequest(BaseModel):
     task_id: str
@@ -424,7 +433,14 @@ def get_unknown_tasks(
             WHERE d.batch_id = ? AND (sv.process_status = 'unknown_pending_confirmation' OR sv.is_unknown = 1)
         """, (batch_id,))
         rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            item['explicit_rejection'] = _is_explicit_request_rejection(
+                item.get('error_message')
+            )
+            items.append(item)
+        return items
 
 @router.post("/resolve_unknown")
 def resolve_unknown_task(
@@ -442,7 +458,8 @@ def resolve_unknown_task(
     with get_db(immediate=True) as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT t.id, t.batch_id, t.slot_id, t.slot_version_id, t.status, bl.id as ledger_id,
+            SELECT t.id, t.batch_id, t.slot_id, t.slot_version_id, t.status, t.last_error,
+                   bl.id as ledger_id,
                    sv.process_status, sv.raw_image_path, sv.preview_image_path, sv.is_invalidated,
                    sv.depends_on_panorama_version_id, s.slot_type, t.design_id,
                    d.status as design_status, s.current_version_id as slot_current_vid
@@ -473,7 +490,45 @@ def resolve_unknown_task(
         design_curr_status = task_row["design_status"]
         slot_current_vid = task_row["slot_current_vid"]
 
-        if req.resolution == "confirm_success":
+        if req.resolution == "confirm_request_rejected":
+            if not _is_explicit_request_rejection(task_row["last_error"]):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="该任务不是明确的上游 HTTP 4xx 请求拒绝，不能使用此快捷处置",
+                )
+            if task_row["raw_image_path"] or task_row["preview_image_path"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="本地已有图片记录，不能按请求拒绝释放",
+                )
+            conn.execute(
+                """UPDATE slot_versions
+                   SET process_status='failed',is_unknown=0,error_message=?
+                   WHERE id=?""",
+                (task_row["last_error"], vid),
+            )
+            conn.execute(
+                """UPDATE tasks
+                   SET status='failed',failure_stage='request_rejected',
+                       retry_status='explicit_http_rejection',
+                       updated_at=datetime('now','localtime')
+                   WHERE id=?""",
+                (req.task_id,),
+            )
+            if slot_current_vid == vid:
+                conn.execute(
+                    "UPDATE slots SET status='empty',updated_at=datetime('now','localtime') WHERE id=?",
+                    (sid,),
+                )
+            if ledger_id:
+                release_budget_failed(
+                    conn,
+                    bid,
+                    ledger_id,
+                    reason=f"Explicit HTTP rejection: {task_row['last_error']}",
+                )
+
+        elif req.resolution == "confirm_success":
             raw_path_str = task_row["raw_image_path"]
             preview_path_str = task_row["preview_image_path"]
 

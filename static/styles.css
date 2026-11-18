@@ -338,6 +338,8 @@ input[type="checkbox"] { accent-color: var(--primary-600); }
 .bulk-toolbar label { display: inline-flex; gap: 8px; align-items: center; }
 .bulk-toolbar button { margin-left: auto; }
 .workbench-notice p { width: 100%; margin: 0; }
+.workbench-notice-detail { width: 100%; color: #64748b; font-size: 12px; }
+.btn-resolve-rejected { white-space: nowrap; }
 .technical-failures-panel { margin: 0 0 16px; padding: 16px; border-color: #fde2e2; background: linear-gradient(180deg,#fff 0%,#fffafa 100%); }
 .technical-failures-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
 .technical-failures-heading h3 { display:flex; align-items:center; gap:8px; color:#3f2630; font-size:14px; font-weight:800; }

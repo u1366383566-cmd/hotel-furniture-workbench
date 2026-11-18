@@ -1155,6 +1155,60 @@ class TaskWorker:
                         conn.execute("UPDATE slots SET status = 'empty', updated_at = datetime('now', 'localtime') WHERE id = ? AND current_version_id = ?", (slot_id, slot_version_id))
                         if ledger_id:
                             release_budget_failed(conn, batch_id, ledger_id, reason="Policy rejected")
+                elif isinstance(e, ValueError):
+                    # Other HTTP 4xx responses are explicit request rejections.
+                    # The upstream returned a response and declined the request,
+                    # so this is a known failure rather than an unknown result
+                    # that might still be charged.
+                    logger.warning(f"Task {task_id} Explicit request rejection: {e}")
+                    with get_db(immediate=True) as conn:
+                        _finish_generation_attempt(conn, task_id, "failed", error=e)
+                        conn.execute(
+                            """UPDATE tasks
+                               SET status='failed',failure_stage='request_rejected',
+                                   retry_status='explicit_http_rejection',
+                                   last_error=?,updated_at=datetime('now','localtime')
+                               WHERE id=?""",
+                            (err_str, task_id),
+                        )
+                        conn.execute(
+                            """UPDATE slot_versions
+                               SET process_status='failed',is_unknown=0,error_message=?
+                               WHERE id=?""",
+                            (err_str, slot_version_id),
+                        )
+                        conn.execute(
+                            """UPDATE slots SET status='empty',updated_at=datetime('now','localtime')
+                               WHERE id=? AND current_version_id=?""",
+                            (slot_id, slot_version_id),
+                        )
+                        if ledger_id:
+                            release_budget_failed(
+                                conn,
+                                batch_id,
+                                ledger_id,
+                                reason=f"Explicit HTTP rejection: {err_str}",
+                            )
+                        conn.execute(
+                            """INSERT INTO audit_logs(
+                                   id,batch_id,action,actor_name,actor_role,detail
+                               ) VALUES (?,?,'image_request_rejected','system','system',?)""",
+                            (
+                                f'aud_{uuid.uuid4().hex}',
+                                batch_id,
+                                json.dumps(
+                                    {
+                                        'task_id': task_id,
+                                        'design_code': design_code,
+                                        'slot_type': slot_type,
+                                        'error': err_str,
+                                        'ledger_id': ledger_id,
+                                        'upstream_response_received': True,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            ),
+                        )
                 else:
                     # 通用未捕获异常：保守作为 unknown 处理，暂停批次，绝不盲目假定未扣费！
                     logger.error(f"Task {task_id} Unhandled Exception (Conservatively held as unknown): {e}", exc_info=True)

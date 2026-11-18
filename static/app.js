@@ -1125,6 +1125,7 @@ async function loadTechnicalFailures() {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.dataset.taskId = item.task_id;
+      checkbox.dataset.requiresRisk = item.requires_risk_ack ? '1' : '0';
       checkbox.disabled = !item.retryable || !canManage;
       checkbox.setAttribute('aria-label', `选择 ${item.design_code} ${slotTypeLabels[item.slot_type] || item.slot_type}`);
       const info = document.createElement('div');
@@ -1141,12 +1142,18 @@ async function loadTechnicalFailures() {
       info.append(title, reason, meta);
       const status = document.createElement('span');
       status.className = `wb-badge ${item.retryable ? 'wb-badge-amber' : 'wb-badge-slate'}`;
-      status.textContent = item.retryable ? '扣费未知' : '已失效/需处理';
+      status.textContent = item.retryable
+        ? (item.requires_risk_ack ? '扣费未知' : '上游明确拒绝')
+        : '已失效/需处理';
       row.append(checkbox, info, status);
       list.appendChild(row);
     }
     const retryable = state.technicalFailures.some(item => item.retryable);
     actions.classList.toggle('hidden', !canManage || !retryable);
+    document.getElementById('technical-failures-risk-label').classList.toggle(
+      'hidden',
+      !state.technicalFailures.some(item => item.retryable && item.requires_risk_ack),
+    );
     document.getElementById('technical-failures-accept-risk').checked = false;
     document.getElementById('technical-failures-select-all').checked = false;
   } catch (error) {
@@ -2232,6 +2239,7 @@ async function loadUnknownTasks() {
     tasks.forEach(t => {
       const row = document.createElement('div');
       row.className = 'unknown-task-row p-3 bg-white border border-violet-100 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+      const explicitRejection = t.explicit_rejection && t.task_status !== 'superseded_unknown';
       row.innerHTML = `
         <div class="min-w-0">
           <div class="flex items-center gap-2">
@@ -2240,7 +2248,11 @@ async function loadUnknownTasks() {
           </div>
           <div class="text-[11px] text-inkMuted mt-0.5 font-mono">${t.task_status === 'superseded_unknown' ? '已重发；原请求费用仍待核账' : 'unknown_pending_confirmation'} | 异常: ${escapeText(t.error_message || '上游超时/断连')}</div>
         </div>
-        ${t.task_status === 'superseded_unknown' ? '' : `<div class="flex items-center gap-2 flex-wrap shrink-0">
+        ${t.task_status === 'superseded_unknown' ? '' : explicitRejection ? `<div class="flex items-center gap-2 flex-wrap shrink-0">
+          <button class="btn-resolve-rejected wb-btn wb-btn-soft-blue px-2.5 py-1.5" data-tid="${t.task_id}">
+            上游已明确拒绝，释放并标记失败
+          </button>
+        </div>` : `<div class="flex items-center gap-2 flex-wrap shrink-0">
           <input aria-label="账单或流水凭据编号" class="unknown-billing-ref wb-input w-44" placeholder="账单/流水凭据编号">
           <label class="flex items-center gap-1 text-xs text-inkBody cursor-pointer"><input type="checkbox" aria-label="确认已核账且无扣费" class="unknown-attest accent-blue-600 mr-1">已核账无扣费</label>
           <button class="btn-resolve-success wb-btn wb-btn-grad px-2.5 py-1.5" data-tid="${t.task_id}">
@@ -2290,6 +2302,30 @@ async function loadUnknownTasks() {
           await loadDesigns(true);
         } catch (e) {
           showToast(e.message, true);
+        }
+      });
+    });
+
+    container.querySelectorAll('.btn-resolve-rejected').forEach(b => {
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          await apiFetch('/api/system/resolve_unknown', {
+            method: 'POST',
+            body: JSON.stringify({
+              task_id: b.dataset.tid,
+              resolution: 'confirm_request_rejected'
+            })
+          });
+          showToast('已按上游 HTTP 4xx 明确拒绝释放预占，任务可在技术失败列表中重新排队');
+          await loadUnknownTasks();
+          await loadBudget();
+          await loadDesigns(true);
+          await loadTechnicalFailures();
+        } catch (e) {
+          showToast(e.message, true);
+        } finally {
+          b.disabled = false;
         }
       });
     });

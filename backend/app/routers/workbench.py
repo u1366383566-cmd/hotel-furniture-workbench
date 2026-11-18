@@ -309,18 +309,43 @@ def archive_selected(batch_id: str, req: QuadSelection, user: UserContext = Depe
 @router.get('/batches/{batch_id}/planning')
 def planning_status(batch_id: str, user: UserContext = Depends(require_roles(['operator','leader','admin']))):
     with get_db() as conn:
+        batch = conn.execute(
+            'SELECT status,pause_reason,is_circuit_broken FROM batches WHERE id=?',
+            (batch_id,),
+        ).fetchone()
+        if not batch:
+            raise HTTPException(404, '任务不存在')
         rows=conn.execute("""SELECT design_id,status,error,attempts,technical_retry_count,
             retry_after,started_at FROM planning_jobs WHERE batch_id=? ORDER BY created_at""",(batch_id,)).fetchall()
-        return {'jobs':[dict(r) for r in rows]}
+        unknown_count = conn.execute(
+            """SELECT COUNT(*) AS n FROM slot_versions sv
+               JOIN designs d ON d.id=sv.design_id
+               WHERE d.batch_id=? AND sv.process_status='unknown_pending_confirmation'""",
+            (batch_id,),
+        ).fetchone()['n']
+        return {
+            'jobs':[dict(r) for r in rows],
+            'batch':dict(batch),
+            'unknown_count':unknown_count,
+        }
 
 
 @router.post('/batches/{batch_id}/retry-planning')
 def retry_planning(batch_id: str, user: UserContext = Depends(require_roles(['operator','leader','admin']))):
     with get_db(immediate=True) as conn:
-        batch=conn.execute('SELECT status,is_circuit_broken FROM batches WHERE id=?',(batch_id,)).fetchone()
+        batch=conn.execute(
+            'SELECT status,pause_reason,is_circuit_broken FROM batches WHERE id=?',
+            (batch_id,),
+        ).fetchone()
         if not batch: raise HTTPException(404,'任务不存在')
-        if batch['status']!='active' or batch['is_circuit_broken']:
-            raise HTTPException(409,'任务已暂停，请联系管理员')
+        if batch['is_circuit_broken']:
+            raise HTTPException(409,'任务已熔断，请先在管理中心完成熔断恢复')
+        unknown_pause = (
+            batch['status']=='paused'
+            and batch['pause_reason']=='PAUSE_UNKNOWN_PENDING'
+        )
+        if batch['status']!='active' and not unknown_pause:
+            raise HTTPException(409,'任务已暂停，当前暂停原因不允许重试规划；请先处理对应任务状态')
         # Only safe, explicit planning failures are retried.  Unknown/running
         # jobs are left untouched and no new design is created by this endpoint.
         cur=conn.execute("""
@@ -334,7 +359,10 @@ def retry_planning(batch_id: str, user: UserContext = Depends(require_roles(['op
 
 
 def _technical_failure_eligibility(row) -> tuple[bool, Optional[str]]:
-    if row['task_status'] != 'failed' or row['failure_stage'] != 'request_charge_unknown':
+    if row['task_status'] != 'failed' or row['failure_stage'] not in (
+        'request_charge_unknown',
+        'request_rejected',
+    ):
         return False, '该任务不是可重试的请求失败'
     if row['design_status'] in ('archived', 'eliminated'):
         return False, '设计已归档或淘汰'
@@ -374,7 +402,7 @@ def technical_failures(
                JOIN designs d ON d.id=t.design_id
                JOIN slot_versions sv ON sv.id=t.slot_version_id
                WHERE t.batch_id=? AND t.status='failed'
-                 AND t.failure_stage='request_charge_unknown'
+                 AND t.failure_stage IN ('request_charge_unknown','request_rejected')
                ORDER BY t.updated_at ASC,t.id ASC""",
             (batch_id,),
         ).fetchall()
@@ -383,6 +411,7 @@ def technical_failures(
         item = dict(row)
         retryable, reason = _technical_failure_eligibility(row)
         item['retryable'] = retryable
+        item['requires_risk_ack'] = row['failure_stage'] == 'request_charge_unknown'
         item['reason'] = reason
         items.append(item)
     return {'batch_id': batch_id, 'count': len(items), 'items': items}
@@ -394,8 +423,6 @@ def retry_technical_failures(
     req: TechnicalRetryRequest,
     user: UserContext = Depends(require_roles(['leader', 'admin'])),
 ):
-    if not req.accept_unknown_charge:
-        raise HTTPException(400, '必须明确接受上游扣费未知的风险')
     results = []
     with get_db() as conn:
         batch = conn.execute(
@@ -405,6 +432,18 @@ def retry_technical_failures(
         raise HTTPException(404, '任务不存在')
     if batch['status'] != 'active' or batch['is_circuit_broken']:
         raise HTTPException(409, '任务当前已暂停或熔断，请恢复后再重试')
+    with get_db() as conn:
+        placeholders = ','.join('?' for _ in req.task_ids)
+        selected_stages = conn.execute(
+            f"""SELECT failure_stage FROM tasks
+                WHERE batch_id=? AND id IN ({placeholders})""",
+            [batch_id, *req.task_ids],
+        ).fetchall()
+    if (
+        not req.accept_unknown_charge
+        and any(row['failure_stage'] == 'request_charge_unknown' for row in selected_stages)
+    ):
+        raise HTTPException(400, '必须明确接受上游扣费未知的风险')
 
     for task_id in dict.fromkeys(req.task_ids):
         try:
@@ -427,6 +466,8 @@ def retry_technical_failures(
                 retryable, reason = _technical_failure_eligibility(row)
                 if not retryable:
                     raise ValueError(reason or '任务当前不可重试')
+                if row['failure_stage'] == 'request_charge_unknown' and not req.accept_unknown_charge:
+                    raise ValueError('必须明确接受上游扣费未知的风险')
                 ledger_id = reserve_budget(
                     conn,
                     batch_id=batch_id,
