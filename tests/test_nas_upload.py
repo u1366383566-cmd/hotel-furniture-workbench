@@ -58,12 +58,26 @@ def test_lost_response_retry_checks_remote_before_upload(client, monkeypatch):
     remote=FakeRemote();remote.lose_response=True
     assert service.process_one(lambda:remote)
     assert job(did)['status']=='waiting' and remote.puts==1
+    remote.files['TFMK9999/Thumbs.db'] = b'host metadata'
     client.post('/api/nas-upload/enqueue', json={'batch_id':bid,'design_ids':[did]})
     assert service.process_one(lambda:remote)
     assert job(did)['status']=='awaiting_review' and remote.puts==4
-    assert len(remote.names('TFMK9999'))==4
+    product_files = {
+        name for name in remote.names('TFMK9999')
+        if not service._is_webdav_system_artifact(name)
+    }
+    assert len(product_files)==4
     with get_db() as c:
         assert c.execute("SELECT count(*) FROM nas_upload_items WHERE job_id=? AND status='uploaded_unverified'",(job(did)['id'],)).fetchone()[0]==4
+
+
+def test_webdav_host_metadata_is_ignored_but_unknown_product_files_are_not():
+    assert service._is_webdav_system_artifact('Thumbs.db') is True
+    assert service._is_webdav_system_artifact('@eaDir/cover.jpg') is True
+    assert service._is_webdav_system_artifact('._TFMK001-X611-01-ST.png') is True
+    assert service._is_webdav_system_artifact('DAVFS.TMP-123') is True
+    assert service._is_webdav_system_artifact('TFMK002-X611-01-ST.png') is False
+    assert service._is_webdav_system_artifact('another-product.png') is False
 
 
 def test_formal_conflict_never_overwritten(client, monkeypatch):

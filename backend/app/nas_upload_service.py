@@ -17,7 +17,24 @@ from .export_service import _collect_export_data, render_product_images
 from .product_numbering import format_product_code
 
 REMOTE_ROOT = '美工/阿里国际站/PIC-BANK/JD/TFMK'
+DEFAULT_WEBDAV_TIMEOUT_SECONDS = 600
 logger = logging.getLogger(__name__)
+
+_WEBDAV_SYSTEM_FILES = {
+    'thumbs.db',
+    'desktop.ini',
+    '.ds_store',
+}
+_WEBDAV_SYSTEM_DIRS = {
+    '@eadir',
+    '#recycle',
+    '.temporaryitems',
+}
+_WEBDAV_SYSTEM_PREFIXES = (
+    'davfs.tmp',
+    '.davfs.tmp',
+    '.~lock.',
+)
 
 
 class NasConflict(Exception):
@@ -26,6 +43,22 @@ class NasConflict(Exception):
 
 class NasPreflightError(Exception):
     pass
+
+
+def _is_webdav_system_artifact(name: str) -> bool:
+    """Ignore host-generated metadata without hiding real product files."""
+    parts = [part for part in str(name or '').strip('/').split('/') if part]
+    if not parts:
+        return True
+    if any(part.casefold() in _WEBDAV_SYSTEM_DIRS for part in parts):
+        return True
+    leaf = parts[-1]
+    folded = leaf.casefold()
+    return (
+        folded in _WEBDAV_SYSTEM_FILES
+        or folded.startswith(_WEBDAV_SYSTEM_PREFIXES)
+        or leaf.startswith('._')
+    )
 
 
 def enqueue_upload(conn, design_id, automatic=False):
@@ -73,7 +106,12 @@ class WebDav:
             password = subprocess.run(['rclone', 'reveal', section['pass']], check=True, capture_output=True, text=True, timeout=10).stdout.rstrip('\n')
         except (OSError, subprocess.SubprocessError, KeyError):
             raise RuntimeError('NAS 连接凭据不可用') from None
-        self.client = httpx.Client(auth=(section['user'], password), timeout=httpx.Timeout(120, connect=45), follow_redirects=False, trust_env=False)
+        self.client = httpx.Client(
+            auth=(section['user'], password),
+            timeout=httpx.Timeout(DEFAULT_WEBDAV_TIMEOUT_SECONDS, connect=45),
+            follow_redirects=False,
+            trust_env=False,
+        )
 
     def close(self):
         self.client.close()
@@ -204,7 +242,10 @@ def process_one(factory=WebDav):
         if remote.exists(code):
             found = remote.names(code)
             expected = {item[1] for item in images}
-            if not found.issubset(expected):
+            product_files = {
+                name for name in found if not _is_webdav_system_artifact(name)
+            }
+            if not product_files.issubset(expected):
                 raise NasConflict('正式目录包含其他文件，已停止以防覆盖')
             if not job['owns_directory']:
                 raise NasConflict('已有目录归属无法确认，已停止以防覆盖')
