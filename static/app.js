@@ -386,8 +386,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { showToast(e.message, true); }
   });
   renderSeriesChecks();
-  await loadBatches();
-  await refreshWorkbenchInfo();
   document.getElementById('upstream-quota-refresh').addEventListener('click', loadUpstreamQuota);
   document.getElementById('style-new').addEventListener('click', () => {
     document.getElementById('style-editor').classList.remove('hidden');
@@ -449,7 +447,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       try { const rule = JSON.parse(raw.value); rule[key] = list ? e.target.value.split('\n').map(x => x.trim()).filter(Boolean) : e.target.value; raw.value = JSON.stringify(rule, null, 2); } catch (_) {}
     });
   }
-  await loadUpstreamQuota();
+  // Wire the controls before starting requests, and keep remote quota off the startup path.
+  void loadBatches();
+  void loadUpstreamQuota();
   setInterval(loadUpstreamQuota, 60000);
 
   let polling = false;
@@ -457,15 +457,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!state.currentBatchId || document.hidden || polling) return;
     polling = true;
     try {
-      await loadDesigns(false);
-      await loadBudget();
+      await Promise.allSettled([loadDesigns(false), loadBudget()]);
     } finally {
       polling = false;
     }
   }, 8000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && state.currentBatchId) {
-      loadDesigns(false).then(() => loadBudget());
+      if (!polling) void Promise.allSettled([loadDesigns(false), loadBudget()]);
     }
   });
 });
@@ -1039,8 +1038,8 @@ async function onBatchChanged() {
   }[curBatch.approved_rule_snapshot_status] || '规则快照状态未知';
   document.getElementById('rule-snapshot-status').innerText = snapshotText;
   await Promise.allSettled([
-    loadBudget(), loadDesigns(true), loadTechnicalFailures(),
-    loadPlanningPanel(), loadWatermarkConfig(), loadArchiveDeliveryConfig(), loadAuditLogs(),
+    loadBudget(), loadDesigns(true), loadPlanningPanel(),
+    ...(state.activeTab === 'system' ? [loadWatermarkConfig(), loadArchiveDeliveryConfig(), loadAuditLogs()] : []),
   ]);
 }
 
@@ -1171,6 +1170,7 @@ function renderCurrentTab(background = false) {
     loadImageApiConfig();
     loadTextApiConfig();
     loadUnknownTasks();
+    loadWatermarkConfig();
     loadArchiveDeliveryConfig();
     loadAuditLogs();
   }
@@ -1921,6 +1921,9 @@ function renderQuadTab() {
   changedQuery('.btn-archive-quad').forEach(b => {
     b.addEventListener('click', async () => {
       const design = state.designs.find(item => item.id === b.dataset.id);
+      const label = b.textContent;
+      b.disabled = true;
+      b.textContent = '归档中…';
       try {
         await apiFetch(`/api/designs/${b.dataset.id}/review_quad`, {
           method: 'POST',
@@ -1931,10 +1934,12 @@ function renderQuadTab() {
           })
         });
         showToast('设计组已合格归档，完成套图锁定！');
-        await loadDesigns(true);
-        await loadBudget();
+        await Promise.allSettled([loadDesigns(true), loadBudget()]);
       } catch (e) {
         showToast(e.message, true);
+      } finally {
+        b.textContent = label;
+        b.disabled = false;
       }
     });
   });

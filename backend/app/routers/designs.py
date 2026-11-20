@@ -378,8 +378,15 @@ def list_batch_design_summary(
         ).fetchall()
 
         task_rows = conn.execute(
-            """SELECT t.* FROM tasks t JOIN designs d ON d.id=t.design_id
-               WHERE d.batch_id=? ORDER BY t.created_at DESC,t.id DESC""",
+            """SELECT t.id,t.slot_version_id,t.retry_after,t.failure_stage,
+                      t.auto_retry_count,t.retry_status
+               FROM designs d JOIN slots s ON s.design_id=d.id
+               JOIN tasks t ON t.id=(
+                   SELECT latest.id FROM tasks latest
+                   WHERE latest.design_id=d.id AND latest.slot_version_id=s.current_version_id
+                   ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+               )
+               WHERE d.batch_id=?""",
             (batch_id,),
         ).fetchall()
         tasks_by_version = {}
@@ -405,7 +412,8 @@ def list_batch_design_summary(
         ).fetchall()
         uploads = {row["design_id"]: dict(row) for row in upload_rows}
         if upload_rows:
-            job_ids = [row["id"] for row in upload_rows]
+            uploads_by_job = {row["id"]: row for row in uploads.values()}
+            job_ids = list(uploads_by_job)
             placeholders = ",".join("?" for _ in job_ids)
             for item in conn.execute(
                 f"""SELECT job_id,slot_type,filename,status,byte_count,image_format,jpeg_quality
@@ -413,13 +421,7 @@ def list_batch_design_summary(
                     WHERE job_id IN ({placeholders}) ORDER BY filename""",
                 job_ids,
             ):
-                upload = next(
-                    (candidate for candidate in uploads.values()
-                     if candidate["id"] == item["job_id"]),
-                    None,
-                )
-                if upload is not None:
-                    upload.setdefault("items", []).append(dict(item))
+                uploads_by_job[item["job_id"]].setdefault("items", []).append(dict(item))
         deliveries = _archive_delivery_payload(conn, [row["id"] for row in design_rows])
 
         exports = {

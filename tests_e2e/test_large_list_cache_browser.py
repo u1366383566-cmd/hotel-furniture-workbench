@@ -216,6 +216,13 @@ def run():
             image_requests = []
             summary_requests = []
             full_requests = []
+            admin_requests = []
+            page.on(
+                "request",
+                lambda request: admin_requests.append(request.url)
+                if request.url.endswith(("/watermark", "/archive_delivery", "/audit_logs"))
+                else None,
+            )
             page.on(
                 "request",
                 lambda request: image_requests.append(request.url)
@@ -254,6 +261,7 @@ def run():
             )
             assert summary_requests, "summary polling endpoint was not used"
             assert not full_requests, f"full design endpoint was requested by the page: {full_requests}"
+            assert not admin_requests, f"review tabs requested management data: {admin_requests}"
 
             page.evaluate(
                 """() => {
