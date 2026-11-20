@@ -294,12 +294,12 @@
       <!-- 4. 已归档与导出 -->
       <div id="tab-panel-archived" class="space-y-4 hidden">
         <div class="section-intro"><div><p class="eyebrow">03 / COMPLETED</p><h2>已完成</h2><p>归档成果集中在这里，可单款或批量导出。</p></div><div class="watermark-preview"><span>导出水印</span><img src="/static/seezo-watermark.png" alt="SEEZO 水印预览"></div></div>
-        <div id="export-selection" class="bulk-toolbar hidden"><label for="export-select-all"><input type="checkbox" id="export-select-all"> 全选已完成</label><span id="export-selected-count">已选 0 组</span><button id="export-selected" class="wb-btn wb-btn-dark">导出所选</button><button id="nas-upload-selected" class="wb-btn wb-btn-ghost">上传所选到 NAS</button></div>
+        <div id="export-selection" class="bulk-toolbar hidden"><label for="export-select-all"><input type="checkbox" id="export-select-all"> 全选已完成</label><span id="export-selected-count">已选 0 组</span><button id="export-selected" class="wb-btn wb-btn-dark">导出所选 ZIP</button><button id="nas-upload-selected" class="wb-btn wb-btn-ghost">上传所选到 NAS</button></div>
         <div id="export-progress" class="export-progress hidden" role="status" aria-live="polite"></div>
         <div class="flex items-center justify-between gap-3 wb-card p-4">
           <div class="min-w-0">
             <h3 class="text-sm font-bold text-inkTitle">批次归档套图打包</h3>
-            <p class="text-xs text-inkMuted mt-0.5">将当前批次所有已归档通过的设计重新压制最终水印并导出标准 ZIP。</p>
+            <p class="text-xs text-inkMuted mt-0.5">归档格式在归档时冻结。导出会等待四张规范图准备完成，并复用 NAS 的同一份字节。</p>
           </div>
           <button id="btn-export-batch-zip" class="wb-btn wb-btn-grad shrink-0">导出批次全部已归档 ZIP</button>
         </div>
@@ -436,6 +436,15 @@
                 </div>
               </div>
               <button id="btn-save-watermark" class="wb-btn wb-btn-dark w-full">保存水印配置</button>
+              <div class="rounded-xl border border-lineLight bg-slate-50/70 p-3 space-y-2">
+                <label class="block text-inkBody font-medium" for="cfg-archive-format">后续归档图片格式</label>
+                <select id="cfg-archive-format" class="w-full" aria-label="后续归档图片格式">
+                  <option value="png">PNG（默认，无损）</option>
+                  <option value="jpg">JPG（4:4:4，700000 字节优先）</option>
+                </select>
+                <p class="text-[11px] text-inkMuted">只影响之后新归档；已在队列、部分上传或已归档的历史组保留冻结格式。</p>
+                <button id="btn-save-archive-format" class="wb-btn wb-btn-soft-blue w-full" type="button">保存后续归档格式</button>
+              </div>
             </div>
           </div>
 

@@ -49,11 +49,17 @@ async function apiFetch(url, options = {}) {
   });
   if (!res.ok) {
     let errMsg = `请求失败 (${res.status})`;
+    let detail = null;
     try {
       const errData = await res.json();
-      errMsg = errData.detail || errData.message || errMsg;
+      detail = errData.detail;
+      errMsg = (typeof detail === 'string' ? detail : detail?.message)
+        || errData.message || errMsg;
     } catch (e) {}
-    throw new Error(errMsg);
+    const error = new Error(errMsg);
+    error.status = res.status;
+    error.code = typeof detail === 'object' ? detail?.code : null;
+    throw error;
   }
   return res.json();
 }
@@ -89,30 +95,93 @@ async function downloadAuthenticatedZip(url, fallbackName) {
 }
 
 let exportInProgress = false;
+function archiveExportUrl(url, retryFailed) {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}retry_failed=${retryFailed ? '1' : '0'}`;
+}
+
+function abortableDelay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      reject(new DOMException('导出等待已取消', 'AbortError'));
+    };
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, {once: true});
+  });
+}
+
 async function runZipExport(url, options, description) {
   if (exportInProgress) { showToast('已有导出正在打包，请稍候'); return; }
   exportInProgress = true;
   const status = document.getElementById('export-progress');
-  const selected = document.getElementById('export-selected');
-  const batch = document.getElementById('btn-export-batch-zip');
-  selected.disabled = true; batch.disabled = true;
-  selected.textContent = '正在打包…';
+  const controller = new AbortController();
+  const deadline = Date.now() + 120000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 120000);
+  const controls = ['export-selected', 'btn-export-batch-zip']
+    .map(id => document.getElementById(id))
+    .filter(Boolean);
+  const labels = new Map(controls.map(control => [control, control.textContent]));
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'wb-btn wb-btn-ghost';
+  cancelButton.textContent = '取消等待';
+  cancelButton.addEventListener('click', () => controller.abort());
+  const setStatus = (message, canCancel = false) => {
+    status.replaceChildren(document.createTextNode(message));
+    if (canCancel) status.append(' ', cancelButton);
+  };
+  controls.forEach(control => { control.disabled = true; });
+  document.getElementById('export-selected').textContent = '正在打包…';
   status.classList.remove('hidden');
-  status.textContent = `正在为${description}压制水印并打包，请稍候；完成后会自动交给浏览器下载。`;
+  setStatus(`正在为${description}等待规范图片后台准备；完成后会自动交给浏览器下载。`, true);
   try {
-    const result = await apiFetch(url, options);
+    let result;
+    let retryFailed = true;
+    while (true) {
+      if (Date.now() >= deadline) throw new Error('等待规范图片准备超时，请稍后再次点击导出');
+      result = await apiFetch(archiveExportUrl(url, retryFailed), {
+        ...options,
+        signal: controller.signal,
+      });
+      if (result?.status !== 'pending') break;
+      retryFailed = false;
+      const remainingSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setStatus(
+        `${result.message || '规范图片正在后台准备'}；剩余最多 ${remainingSeconds} 秒。`,
+        true,
+      );
+      const retryAfter = Math.min(5000, Math.max(500, Number(result.retry_after_ms) || 1000));
+      await abortableDelay(retryAfter, controller.signal);
+    }
     await downloadAuthenticatedZip(result.download_url, result.file_name);
-    status.textContent = `打包完成，已交给浏览器下载：${result.file_name}。请查看浏览器下载列表。`;
+    setStatus(`打包完成，已交给浏览器下载：${result.file_name}。请查看浏览器下载列表。`);
     state.exportRecordsBatch = null;
     await loadDesigns(true);
     await loadExportRecords();
   } catch (error) {
-    status.textContent = `导出失败：${error.message}`;
-    showToast(error.message, true);
+    const message = error.name === 'AbortError'
+      ? (timedOut ? '等待规范图片准备超时，请稍后再次点击导出' : '已取消等待，已有后台任务不受影响')
+      : error.message;
+    setStatus(`导出失败：${message}`);
+    showToast(message, true);
   } finally {
+    clearTimeout(timeout);
     exportInProgress = false;
-    selected.disabled = false; batch.disabled = false;
-    selected.textContent = '导出所选';
+    controls.forEach(control => {
+      control.disabled = false;
+      control.textContent = labels.get(control);
+    });
   }
 }
 
@@ -638,7 +707,6 @@ function setupModals() {
     if (!state.currentBatchId) return;
     await runZipExport(`/api/export/batch/${state.currentBatchId}`, {method:'POST'}, '本批次已归档图片');
   });
-
   document.getElementById('btn-refresh-exports').addEventListener('click', () => loadExportRecords());
 
   // 30 天清理保护
@@ -675,6 +743,21 @@ function setupModals() {
       showToast('水印配置保存成功');
     } catch (e) {
       showToast(e.message, true);
+    }
+  });
+
+  document.getElementById('btn-save-archive-format').addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    try {
+      const result = await apiFetch('/api/system/archive_delivery', {
+        method: 'POST',
+        body: JSON.stringify({ image_format: document.getElementById('cfg-archive-format').value })
+      });
+      showToast(result.message);
+    } catch (e) {
+      showToast(e.message, true);
+    } finally {
+      event.currentTarget.disabled = false;
     }
   });
 
@@ -957,7 +1040,7 @@ async function onBatchChanged() {
   document.getElementById('rule-snapshot-status').innerText = snapshotText;
   await Promise.allSettled([
     loadBudget(), loadDesigns(true), loadTechnicalFailures(),
-    loadPlanningPanel(), loadWatermarkConfig(), loadAuditLogs(),
+    loadPlanningPanel(), loadWatermarkConfig(), loadArchiveDeliveryConfig(), loadAuditLogs(),
   ]);
 }
 
@@ -1088,6 +1171,7 @@ function renderCurrentTab(background = false) {
     loadImageApiConfig();
     loadTextApiConfig();
     loadUnknownTasks();
+    loadArchiveDeliveryConfig();
     loadAuditLogs();
   }
 }
@@ -2081,6 +2165,13 @@ function renderStandbyTab() {
 
 // ---------- 渲染 4. 已归档与导出成果 ----------
 
+function formatByteSize(byteCount) {
+  const value = Number(byteCount);
+  if (!Number.isFinite(value) || value <= 0) return '大小待生成';
+  if (value >= 1000) return `${(value / 1000).toFixed(1)} KB`;
+  return `${value} B`;
+}
+
 async function renderArchivedTab() {
   const container = document.getElementById('archived-designs-grid');
   const batchId = state.currentBatchId;
@@ -2099,6 +2190,21 @@ async function renderArchivedTab() {
     const alreadyExported = Boolean(d.exported);
     const nasStatus = {held:'等待开启自动上传',queued:'待上传',uploading:'上传中',verifying:'处理中',waiting:'等待重试',awaiting_review:'已上传，待人工确认',success:'上传完成（人工确认）',failed:'上传失败',conflict:'上传冲突'};
     const nas = d.nas_upload;
+    const delivery = d.archive_delivery;
+    const deliveryStatus = {pending:'后台排队',optimizing:'正在准备',ready:'四图已准备',failed:'准备失败'};
+    const slotLabels = {panorama:'场景全景',white_isolated:'整套白底',twin_bed:'双床白底',nightstand_closeup:'床头近景'};
+    const deliveryItems = delivery?.items?.length ? delivery.items : (nas?.items || []);
+    const deliverySummary = delivery
+      ? `${String(delivery.image_format || 'png').toUpperCase()} · ${deliveryStatus[delivery.status] || delivery.status}`
+      : '历史组 · PNG 原文件';
+    const itemSummary = deliveryItems.map(item => {
+      const label = slotLabels[item.slot_type] || item.slot_type;
+      const size = formatByteSize(item.byte_count);
+      const quality = item.jpeg_quality ? ` · q${item.jpeg_quality}` : '';
+      const overLimit = item.byte_count > 700000 ? ' · 超 700000 字节，按实际大小交付' : '';
+      return `${label} ${size}${quality}${overLimit}`;
+    }).join(' / ');
+    const deliveryError = delivery?.items?.find(item => item.optimization_error)?.optimization_error;
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-2">
@@ -2110,6 +2216,7 @@ async function renderArchivedTab() {
       </div>
       <div class="text-xs font-medium text-inkBody">${escapeText(d.structured_spec.model_title)}</div>
       ${d.status === 'archived' && d.product_code ? `<div class="text-xs text-inkBody">NAS：${escapeText(nas ? (nasStatus[nas.status] || nas.status) : '未上传')}${nas?.items?.length ? ` · 已传 ${nas.items.filter(item => item.status === 'uploaded_unverified').length}/4` : ''}${nas?.error ? ` · ${escapeText(nas.error)}` : ''}</div>` : ''}
+      ${d.status === 'archived' && d.product_code ? `<div class="text-[11px] text-inkMuted">归档图片：${escapeText(deliverySummary)}${itemSummary ? ` · ${escapeText(itemSummary)}` : ''}${deliveryError ? ` · ${escapeText(deliveryError)}` : ''}</div>` : ''}
 
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
         ${['panorama', 'white_isolated', 'twin_bed', 'nightstand_closeup'].map(stype => {
@@ -2346,6 +2453,15 @@ async function loadWatermarkConfig() {
     const posSel = document.getElementById('cfg-pos-wm');
     posSel.value = cfg.position;
     if (posSel._syncDD) posSel._syncDD();
+  } catch (e) {}
+}
+
+async function loadArchiveDeliveryConfig() {
+  try {
+    const cfg = await apiFetch('/api/system/archive_delivery');
+    const select = document.getElementById('cfg-archive-format');
+    select.value = cfg.image_format || 'png';
+    if (select._syncDD) select._syncDD();
   } catch (e) {}
 }
 

@@ -6,6 +6,7 @@ from PIL import Image
 from backend.app.database import get_db
 from backend.app.config import RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR
 from backend.app.task_worker import worker_instance
+from backend.app.png_delivery_service import optimize_archive_group
 from quad_snapshot import quad_version_snapshot
 from backend.app.budget_service import (
     reserve_budget, settle_budget_success, release_budget_failed,
@@ -654,6 +655,7 @@ def test_partial_export_uncompleted_target(client):
         "action": "archive",
         "expected_slot_versions": quad_version_snapshot(d_ready),
     }, headers={"X-User-Role": "operator"})
+    optimize_archive_group(d['id'])
 
     # 当前归档 1 款，未达 5 款目标，执行指定设计部分导出
     export_part = client.post("/api/export/selected", json={

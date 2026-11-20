@@ -101,6 +101,61 @@ def _ensure_columns(conn: sqlite3.Connection):
     add_col_if_missing('nas_upload_items', 'slot_version_id', 'TEXT')
     add_col_if_missing('nas_upload_jobs', 'confirmed_by', 'TEXT')
     add_col_if_missing('nas_upload_jobs', 'confirmed_at', 'TEXT')
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS png_delivery_settings (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            policy TEXT NOT NULL DEFAULT 'level6',
+            benchmark_json TEXT,
+            benchmark_error TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("INSERT OR IGNORE INTO png_delivery_settings(id,policy) VALUES (1,'level6')")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS archive_delivery_settings (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            image_format TEXT NOT NULL DEFAULT 'png' CHECK(image_format IN ('png','jpg')),
+            updated_by TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    conn.execute("INSERT OR IGNORE INTO archive_delivery_settings(id,image_format) VALUES (1,'png')")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS archive_delivery_assets (
+            design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+            slot_type TEXT NOT NULL,
+            slot_version_id TEXT NOT NULL REFERENCES slot_versions(id) ON DELETE CASCADE,
+            raw_image_path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            image_format TEXT NOT NULL DEFAULT 'png',
+            archived_at TEXT,
+            watermark_config_json TEXT NOT NULL,
+            canonical_path TEXT,
+            source_width INTEGER,
+            source_height INTEGER,
+            source_mode TEXT,
+            sha256 TEXT,
+            byte_count INTEGER,
+            compress_mode TEXT,
+            jpeg_quality INTEGER,
+            optimization_status TEXT NOT NULL DEFAULT 'pending',
+            optimization_error TEXT,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY(design_id,slot_type),
+            UNIQUE(slot_version_id),
+            CHECK(optimization_status IN ('pending','optimizing','ready','failed')),
+            CHECK((optimization_status='ready') = (canonical_path IS NOT NULL AND sha256 IS NOT NULL AND byte_count IS NOT NULL)),
+            CHECK(byte_count IS NULL OR byte_count > 0)
+        )
+    """)
+    add_col_if_missing('archive_delivery_assets', 'image_format', "TEXT NOT NULL DEFAULT 'png'")
+    add_col_if_missing('archive_delivery_assets', 'archived_at', 'TEXT')
+    add_col_if_missing('archive_delivery_assets', 'jpeg_quality', 'INTEGER')
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_archive_delivery_status ON archive_delivery_assets(optimization_status,design_id)")
+    add_col_if_missing('nas_upload_items', 'image_format', "TEXT NOT NULL DEFAULT 'png'")
+    add_col_if_missing('nas_upload_items', 'jpeg_quality', 'INTEGER')
     conn.execute("""CREATE TABLE IF NOT EXISTS nas_upload_attempts (
         job_id TEXT NOT NULL REFERENCES nas_upload_jobs(id) ON DELETE CASCADE,
         attempt INTEGER NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),

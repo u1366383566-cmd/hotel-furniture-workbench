@@ -368,6 +368,8 @@ def _technical_failure_eligibility(row) -> tuple[bool, Optional[str]]:
         return False, '设计已归档或淘汰'
     if row['slot_current_version_id'] != row['slot_version_id']:
         return False, '槽位已切换版本，旧重试已失效'
+    if row['version_is_invalidated']:
+        return False, '版本已依赖失效'
     if row['raw_image_path'] or row['preview_image_path']:
         return False, '本地已有图片记录，不能按未知结果重发'
     stem = f"{row['design_code']}_{row['slot_type']}_v{row['version_num']}_{row['slot_version_id'][:8]}"
@@ -394,7 +396,8 @@ def technical_failures(
                       t.retry_status,t.updated_at AS task_updated_at,
                       s.slot_type,s.current_version_id AS slot_current_version_id,s.status AS slot_status,
                       d.design_code,d.status AS design_status,
-                      sv.version_num,sv.raw_image_path,sv.preview_image_path,
+                      sv.version_num,sv.is_invalidated AS version_is_invalidated,
+                      sv.raw_image_path,sv.preview_image_path,
                       (SELECT COUNT(*) FROM image_generation_attempts a WHERE a.task_id=t.id)
                           AS attempt_count
                FROM tasks t
@@ -408,8 +411,10 @@ def technical_failures(
         ).fetchall()
     items = []
     for row in rows:
-        item = dict(row)
         retryable, reason = _technical_failure_eligibility(row)
+        if not retryable:
+            continue
+        item = dict(row)
         item['retryable'] = retryable
         item['requires_risk_ack'] = row['failure_stage'] == 'request_charge_unknown'
         item['reason'] = reason
@@ -454,7 +459,8 @@ def retry_technical_failures(
                               t.last_error,t.auto_retry_count,t.retry_status,
                               s.slot_type,s.current_version_id AS slot_current_version_id,
                               s.status AS slot_status,d.design_code,d.status AS design_status,
-                              sv.version_num,sv.raw_image_path,sv.preview_image_path
+                              sv.version_num,sv.is_invalidated AS version_is_invalidated,
+                              sv.raw_image_path,sv.preview_image_path
                        FROM tasks t JOIN slots s ON s.id=t.slot_id
                        JOIN designs d ON d.id=t.design_id
                        JOIN slot_versions sv ON sv.id=t.slot_version_id

@@ -19,6 +19,13 @@ def product_image_name(number, archived_at, slot_type):
     return f'{format_product_code(number)}-X{date.year % 10}{date.month}-{order}-ST.png'
 
 
+def product_delivery_name(number, archived_at, slot_type, image_format):
+    if image_format not in ('png', 'jpg'):
+        raise ValueError('归档图片格式无效')
+    stem = product_image_name(number, archived_at, slot_type)[:-4]
+    return f'{stem}.{image_format}'
+
+
 def allocate_product_number(conn):
     row = conn.execute('SELECT ready, last_number FROM product_number_state WHERE id=1').fetchone()
     if not row or not row['ready']:

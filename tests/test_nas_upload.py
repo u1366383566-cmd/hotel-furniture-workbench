@@ -111,6 +111,36 @@ def test_all_four_are_sent_without_readback(client, monkeypatch):
     assert job(did)['status']=='awaiting_review'
 
 
+def test_partial_legacy_upload_resumes_with_level1_bytes(client, monkeypatch):
+    bid,did=seed(client,monkeypatch)
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    class LoseSecond(FakeRemote):
+        def put_new(self,path,data):
+            self.puts += 1
+            self.files[path] = data
+            if self.puts == 1:
+                raise TimeoutError('second image response unknown')
+    remote=LoseSecond()
+    assert service.process_one(lambda:remote)
+    assert remote.puts==1
+    first_path=next(path for path in remote.files if path.startswith('TFMK9999/'))
+    first_bytes=remote.files[first_path]
+    with get_db() as c:
+        item=c.execute("SELECT filename,sha256,byte_count,status FROM nas_upload_items WHERE job_id=? AND status='uploading'",(job(did)['id'],)).fetchone()
+        assert item['status']=='uploading'
+        assert item['byte_count']==len(first_bytes)
+        assert item['sha256']==hashlib.sha256(first_bytes).hexdigest()
+    client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})
+    assert service.process_one(lambda:remote)
+    assert remote.puts==4
+    assert len(remote.files)==4
+    assert remote.files[first_path] is first_bytes
+    current=job(did)
+    assert current['status']=='awaiting_review'
+    with get_db() as c:
+        assert c.execute("SELECT count(*) FROM archive_delivery_assets WHERE design_id=?",(did,)).fetchone()[0]==0
+
+
 def test_unknown_directory_ownership_is_not_assumed(client, monkeypatch):
     bid,did=seed(client,monkeypatch)
     client.post('/api/nas-upload/enqueue',json={'batch_id':bid,'design_ids':[did]})

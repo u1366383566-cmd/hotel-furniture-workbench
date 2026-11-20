@@ -18,6 +18,7 @@ from .image_adapter import load_image_api_config, load_text_api_config
 from .task_worker import worker_instance
 from .auto_planning_service import planner_worker
 from .nas_upload_service import nas_worker
+from .png_delivery_service import archive_optimizer_worker
 from .routers import nas_upload
 from .routers import batches, designs, slots, export, media, system, smart_planning, workbench
 from .budget_service import BudgetHardLimitExceededError, BudgetWarningExceededError
@@ -36,12 +37,14 @@ async def lifespan(app: FastAPI):
     await worker_instance.start()
     await planner_worker.start()
     await nas_worker.start()
+    await archive_optimizer_worker.start()
     yield
     # 关闭阶段
     logger.info("Stopping background TaskWorker...")
     await worker_instance.stop()
     await planner_worker.stop()
     await nas_worker.stop()
+    await archive_optimizer_worker.stop()
 
 app = FastAPI(
     title="酒店家具智能套图工作台 (Hotel Furniture Workbench)",

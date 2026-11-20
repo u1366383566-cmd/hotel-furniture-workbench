@@ -136,6 +136,7 @@ def test_behavior_contract_ids_and_classes_exist():
         "panorama-bulk", "panorama-select-all", "panorama-selected-count", "panorama-bulk-approve",
         "quad-bulk", "quad-select-all", "quad-selected-count", "quad-bulk-archive",
         "export-selection", "export-select-all", "export-selected-count", "export-selected",
+        "btn-export-batch-zip",
         "planning-job-notice", "smart-planning-panel", "plan-start-hint", "btn-start-from-plans",
         "btn-plan-all", "btn-plan-confirm", "plan-progress", "planning-cards", "admin-budget-panel",
         "budget-per-warning", "budget-per-hard", "budget-settings-save",
@@ -148,7 +149,8 @@ def test_behavior_contract_ids_and_classes_exist():
         "export-records-container", "btn-refresh-exports", "unknown-tasks-container", "btn-refresh-unknown",
         "rule-snapshot-status", "series-rule-select", "series-rule-json", "series-template-version",
         "btn-save-series-rule", "btn-add-series", "new-series-id", "new-series-name", "series-check-container",
-        "cfg-main-wm", "cfg-repeat-wm", "cfg-opacity-wm", "cfg-pos-wm", "btn-save-watermark", "btn-run-cleanup",
+        "cfg-main-wm", "cfg-repeat-wm", "cfg-opacity-wm", "cfg-pos-wm", "btn-save-watermark",
+        "cfg-archive-format", "btn-save-archive-format", "btn-run-cleanup",
         "audit-log-container", "modal-redo", "modal-redo-title", "btn-close-redo", "btn-cancel-redo",
         "btn-submit-redo", "redo-reason-category", "redo-comment", "redo-override-box", "redo-leader-override",
         "modal-batch", "btn-close-batch-modal", "btn-cancel-new-batch", "btn-submit-new-batch",
@@ -174,6 +176,25 @@ def test_behavior_contract_ids_and_classes_exist():
     # E2E 依赖的自绘下拉触发器与选项标记
     assert "batch-select-trigger" in js
     assert "'cust-option'" in js and "cust-trigger" in js
+
+
+def test_archive_format_uses_existing_export_entries_only():
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    js = _read_frontend()
+    for obsolete in (
+        "export-selected-jpg",
+        "btn-export-batch-jpg",
+        "btn-export-single-jpg",
+        "/api/export/jpg/",
+    ):
+        assert obsolete not in html
+        assert obsolete not in js
+    assert 'id="cfg-archive-format"' in html
+    assert "loadArchiveDeliveryConfig" in js
+    assert "abortableDelay" in js
+    assert "AbortController" in js
+    assert "retry_failed" in js
+    assert "120000" in js
 
 
 def test_no_external_resources_in_frontend():

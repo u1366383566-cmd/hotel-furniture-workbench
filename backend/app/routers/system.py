@@ -33,6 +33,54 @@ class RiskReleaseRequest(BaseModel):
     accept_unknown_charge: bool
 
 
+class ArchiveDeliverySettingsRequest(BaseModel):
+    image_format: str = Field(..., pattern=r'^(png|jpg)$')
+
+
+@router.get("/archive_delivery")
+def get_archive_delivery_settings(
+    user: UserContext = Depends(require_roles(["operator", "leader", "admin"]))
+):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT image_format,updated_by,updated_at FROM archive_delivery_settings WHERE id=1"
+        ).fetchone()
+    return {
+        "image_format": row["image_format"] if row else "png",
+        "updated_by": row["updated_by"] if row else None,
+        "updated_at": row["updated_at"] if row else None,
+    }
+
+
+@router.post("/archive_delivery")
+def update_archive_delivery_settings(
+    req: ArchiveDeliverySettingsRequest,
+    user: UserContext = Depends(require_roles(["leader", "admin"]))
+):
+    with get_db(immediate=True) as conn:
+        conn.execute("""
+            INSERT INTO archive_delivery_settings(id,image_format,updated_by)
+            VALUES (1,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                image_format=excluded.image_format,
+                updated_by=excluded.updated_by,
+                updated_at=datetime('now','localtime')
+        """, (req.image_format, user.user_id))
+        conn.execute("""
+            INSERT INTO audit_logs(id,action,actor_name,actor_role,detail)
+            VALUES (?,'update_archive_delivery',?,?,?)
+        """, (
+            f"aud_{uuid.uuid4().hex[:8]}",
+            user.user_id,
+            user.role,
+            json.dumps({"image_format": req.image_format, "affects": "future_archives_only"}),
+        ))
+    return {
+        "message": f"后续归档格式已切换为 {req.image_format.upper()}，历史归档保持原格式",
+        "image_format": req.image_format,
+    }
+
+
 @router.post('/release_unknown_risk')
 def release_unknown_risk(req: RiskReleaseRequest, user: UserContext = Depends(require_roles(['admin']))):
     if not req.accept_unknown_charge:

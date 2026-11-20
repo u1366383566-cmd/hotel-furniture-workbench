@@ -3,6 +3,7 @@ import zipfile
 import pytest
 from PIL import Image, ImageChops
 from backend.app.task_worker import worker_instance
+from backend.app.png_delivery_service import optimize_archive_group
 from quad_snapshot import quad_version_snapshot
 from backend.app.watermark_service import apply_watermark
 from backend.app.config import (
@@ -131,6 +132,7 @@ def test_watermarked_zip_export_integrity(client, monkeypatch):
         "action": "archive",
         "expected_slot_versions": quad_version_snapshot(d_ready_for_archive),
     }, headers={"X-User-Role": "operator"})
+    optimize_archive_group(d['id'])
 
     # 打包期间其他连接仍可取得写锁。
     import sqlite3

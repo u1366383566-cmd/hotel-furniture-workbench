@@ -355,9 +355,40 @@ def test_archive_rejects_corrupt_snapshot_and_export_has_no_partial_zip(client):
     raw_path.write_bytes(b"corrupt-not-a-png")
 
     zips_before = {p.name for p in EXPORTS_DIR.glob("*.zip")}
-    export = client.post(f"/api/export/design/{ready['id']}")
+    pending = client.post(f"/api/export/design/{ready['id']}?retry_failed=1")
+    assert pending.status_code == 202
+    from backend.app.png_delivery_service import process_pending
+    process_pending()
+    export = client.post(f"/api/export/design/{ready['id']}?retry_failed=0")
     assert export.status_code == 400
+    assert "原图损坏或格式无效" in export.json()["detail"]["message"]
+    assert "现有导出入口重试" in export.json()["detail"]["message"]
     assert {p.name for p in EXPORTS_DIR.glob("*.zip")} == zips_before
+
+    with get_db() as conn:
+        delivery = conn.execute(
+            "SELECT slot_type,optimization_status,optimization_error "
+            "FROM archive_delivery_assets WHERE design_id=?",
+            (ready["id"],),
+        ).fetchall()
+    assert len(delivery) == 4
+    assert all(row["optimization_status"] == "pending" for row in delivery)
+    assert any(
+        row["slot_type"] == "white_isolated"
+        and row["optimization_error"] == "原图损坏或格式无效"
+        for row in delivery
+    )
+    summary = client.get(
+        f"/api/designs/batch/{batch['id']}/summary",
+        headers={"X-User-Role": "operator"},
+    ).json()
+    archived = next(item for item in summary if item["id"] == ready["id"])
+    assert archived["archive_delivery"]["status"] == "failed"
+    assert any(
+        item["slot_type"] == "white_isolated"
+        and item["optimization_error"] == "原图损坏或格式无效"
+        for item in archived["archive_delivery"]["items"]
+    )
 
 
 def test_quad_archive_validates_real_snapshot_state_and_unknown_tasks(client):

@@ -2,8 +2,8 @@
 import logging
 import uuid
 import sqlite3
-import io
 import hashlib
+from datetime import datetime
 from PIL import Image
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,13 +16,73 @@ from ..security import UserContext, get_current_user, require_roles
 
 logger = logging.getLogger(__name__)
 from ..budget_service import reserve_budget, BudgetWarningExceededError, BudgetHardLimitExceededError
-from ..config import DEFAULT_REDO_SLOT_LIMIT, DEFAULT_REDO_DESIGN_LIMIT, RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, DEFAULT_WATERMARK
+from ..config import (
+    DEFAULT_REDO_SLOT_LIMIT,
+    DEFAULT_REDO_DESIGN_LIMIT,
+    RAW_IMAGES_DIR,
+    PREVIEW_IMAGES_DIR,
+    DEFAULT_WATERMARK,
+    MAX_ARCHIVE_JPG_BYTES,
+)
 from ..watermark_service import apply_watermark
+from ..export_service import build_archive_delivery_manifest
 from ..planning_service import build_mock_visual_features, build_slot_prompt
 from ..product_numbering import format_product_code, allocate_product_number
 from ..nas_upload_service import enqueue_upload
 
 router = APIRouter(prefix="/api/designs", tags=["Designs"])
+
+
+def _archive_delivery_payload(conn, design_ids):
+    if not design_ids:
+        return {}
+    placeholders = ",".join("?" for _ in design_ids)
+    rows = conn.execute(
+        f"""
+        SELECT design_id,slot_type,filename,image_format,byte_count,jpeg_quality,
+               source_width,source_height,optimization_status,optimization_error
+        FROM archive_delivery_assets
+        WHERE design_id IN ({placeholders})
+        ORDER BY design_id,
+            CASE slot_type
+                WHEN 'white_isolated' THEN 1
+                WHEN 'twin_bed' THEN 2
+                WHEN 'nightstand_closeup' THEN 3
+                ELSE 4
+            END
+        """,
+        design_ids,
+    ).fetchall()
+    grouped = {}
+    for row in rows:
+        item = dict(row)
+        item.pop("design_id")
+        grouped.setdefault(row["design_id"], []).append(item)
+    result = {}
+    for design_id, items in grouped.items():
+        formats = {item["image_format"] or "png" for item in items}
+        statuses = {item["optimization_status"] for item in items}
+        if len(items) != 4 or len(formats) != 1:
+            status = "failed"
+        elif statuses == {"ready"}:
+            status = "ready"
+        elif "failed" in statuses:
+            status = "failed"
+        elif any(item["optimization_error"] for item in items):
+            status = "failed"
+        elif "optimizing" in statuses:
+            status = "optimizing"
+        else:
+            status = "pending"
+        image_format = next(iter(formats)) if len(formats) == 1 else None
+        result[design_id] = {
+            "status": status,
+            "image_format": image_format,
+            "max_bytes": MAX_ARCHIVE_JPG_BYTES if image_format == "jpg" else None,
+            "items": items,
+        }
+    return result
+
 
 def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool = False) -> DesignDetail:
     cur = conn.cursor()
@@ -119,7 +179,12 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
     upload_row = conn.execute('SELECT id,status,error,attempts,updated_at,confirmed_by,confirmed_at FROM nas_upload_jobs WHERE design_id=?', (design_id,)).fetchone()
     upload = dict(upload_row) if upload_row else None
     if upload:
-        upload['items'] = [dict(r) for r in conn.execute('SELECT slot_type,filename,status FROM nas_upload_items WHERE job_id=? ORDER BY filename', (upload['id'],))]
+        upload['items'] = [dict(r) for r in conn.execute(
+            'SELECT slot_type,filename,status,byte_count,image_format,jpeg_quality '
+            'FROM nas_upload_items WHERE job_id=? ORDER BY filename',
+            (upload['id'],),
+        )]
+    archive_delivery = _archive_delivery_payload(conn, [design_id]).get(design_id)
 
     return DesignDetail(
         id=d_row["id"],
@@ -129,6 +194,7 @@ def _load_design_detail(conn: sqlite3.Connection, design_id: str, is_admin: bool
         design_code=d_row["design_code"],
         product_code=format_product_code(d_row['product_number']) if d_row['product_number'] is not None else None,
         nas_upload=upload,
+        archive_delivery=archive_delivery,
         is_standby=bool(d_row["is_standby"]),
         status=d_row["status"],
         planning_status=d_row["planning_status"],
@@ -342,7 +408,8 @@ def list_batch_design_summary(
             job_ids = [row["id"] for row in upload_rows]
             placeholders = ",".join("?" for _ in job_ids)
             for item in conn.execute(
-                f"""SELECT job_id,slot_type,filename,status FROM nas_upload_items
+                f"""SELECT job_id,slot_type,filename,status,byte_count,image_format,jpeg_quality
+                    FROM nas_upload_items
                     WHERE job_id IN ({placeholders}) ORDER BY filename""",
                 job_ids,
             ):
@@ -353,6 +420,7 @@ def list_batch_design_summary(
                 )
                 if upload is not None:
                     upload.setdefault("items", []).append(dict(item))
+        deliveries = _archive_delivery_payload(conn, [row["id"] for row in design_rows])
 
         exports = {
             row["design_id"]: {
@@ -430,11 +498,21 @@ def list_batch_design_summary(
                 ]
             )
         export_info = exports.get(row["id"], {"count": 0, "last_exported_at": None})
+        delivery = deliveries.get(row["id"])
         upload = uploads.get(row["id"])
         if upload:
             revision_parts.extend([upload.get("updated_at"), upload.get("status")])
         if export_info["last_exported_at"]:
             revision_parts.append(export_info["last_exported_at"])
+        if delivery:
+            revision_parts.extend([
+                delivery["status"],
+                delivery["image_format"] or "",
+                ",".join(
+                    f"{item['slot_type']}:{item['optimization_status']}:{item['byte_count']}:{item['jpeg_quality']}"
+                    for item in delivery["items"]
+                ),
+            ])
         result.append(
             {
                 "id": row["id"],
@@ -445,6 +523,7 @@ def list_batch_design_summary(
                 "product_code": format_product_code(row["product_number"])
                 if row["product_number"] is not None else None,
                 "nas_upload": upload,
+                "archive_delivery": delivery,
                 "is_standby": bool(row["is_standby"]),
                 "status": row["status"],
                 "planning_status": row["planning_status"],
@@ -933,21 +1012,8 @@ def review_quad(
             try:
                 with Image.open(raw_file) as archive_image:
                     archive_image.verify()
-                with Image.open(raw_file) as watermark_source:
-                    watermarked = apply_watermark(
-                        watermark_source,
-                        main_text=wm_cfg.get("main_text", DEFAULT_WATERMARK["main_text"]),
-                        repeat_text=wm_cfg.get("repeat_text", DEFAULT_WATERMARK["repeat_text"]),
-                        opacity=float(wm_cfg.get("opacity", DEFAULT_WATERMARK["opacity"])),
-                        font_size=int(wm_cfg.get("font_size", DEFAULT_WATERMARK["font_size"])),
-                        position=wm_cfg.get("position", DEFAULT_WATERMARK["position"]),
-                    )
-                    output = io.BytesIO()
-                    watermarked.save(output, format="PNG")
-                    if not output.getvalue():
-                        raise RuntimeError("watermark output empty")
             except Exception:
-                raise HTTPException(status_code=400, detail=f"槽位 {stype} 原图损坏或最终水印预览无法生成，禁止归档")
+                raise HTTPException(status_code=400, detail=f"槽位 {stype} 原图损坏，禁止归档")
 
             if not row["preview_image_path"]:
                 raise HTTPException(status_code=400, detail=f"槽位 {stype} 预览图缺失，禁止归档")
@@ -966,11 +1032,30 @@ def review_quad(
             conn.execute("UPDATE slots SET status = 'approved' WHERE id = ?", (row["slot_id"],))
 
         number = allocate_product_number(conn)
+        archived_at = datetime.now().replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')
+        delivery_row = conn.execute(
+            "SELECT image_format FROM archive_delivery_settings WHERE id=1"
+        ).fetchone()
+        image_format = delivery_row["image_format"] if delivery_row else "png"
+        canonical_assets = build_archive_delivery_manifest(
+            number, archived_at, wm_cfg, rows_by_type.values(), image_format
+        )
+        for image in canonical_assets:
+            conn.execute("""
+                INSERT INTO archive_delivery_assets (
+                    design_id,slot_type,slot_version_id,raw_image_path,filename,
+                    image_format,archived_at,watermark_config_json,optimization_status
+                ) VALUES (?,?,?,?,?,?,?,?,'pending')
+            """, (
+                design_id,image['slot_type'],image['slot_version_id'],image['raw_image_path'],
+                image['filename'],image_format,archived_at,
+                json.dumps(image['watermark_config'],ensure_ascii=False,separators=(',',':')),
+            ))
         conn.execute("""
             UPDATE designs
-            SET status = 'archived', product_number = ?, archived_at = datetime('now', 'localtime'), updated_at = datetime('now', 'localtime')
+            SET status = 'archived', product_number = ?, archived_at = ?, updated_at = datetime('now', 'localtime')
             WHERE id = ?
-        """, (number, design_id))
+        """, (number, archived_at, design_id))
         enqueue_upload(conn, design_id, automatic=True)
         conn.execute("UPDATE batches SET current_archived_count = current_archived_count + 1 WHERE id = ?", (batch_id,))
 
@@ -984,4 +1069,6 @@ def review_quad(
             INSERT INTO reviews (id, design_id, review_stage, action, detail_comment, reviewer_name, reviewer_role)
             VALUES (?, ?, 'quad_final_pass', 'archive', ?, ?, ?)
         """, (f"rev_{uuid.uuid4().hex[:8]}", design_id, req.detail_comment or "四图终审合格归档", user.user_id, user.role))
-        return _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
+        archived_result = _load_design_detail(conn, design_id, is_admin=user.is_system_admin)
+
+    return archived_result

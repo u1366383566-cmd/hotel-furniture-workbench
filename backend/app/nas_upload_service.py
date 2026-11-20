@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import uuid
+from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from xml.etree import ElementTree
 
@@ -13,7 +14,12 @@ import httpx
 
 from .database import get_db
 from .config import STORAGE_DIR
-from .export_service import _collect_export_data, render_product_images
+from .export_service import (
+    _collect_export_data,
+    archive_delivery_is_ready,
+    render_product_images,
+    retry_failed_archive_delivery,
+)
 from .product_numbering import format_product_code
 
 REMOTE_ROOT = '美工/阿里国际站/PIC-BANK/JD/TFMK'
@@ -80,6 +86,7 @@ def queue_selected(conn, batch_id, ids):
             results.append({'design_id': did, 'ok': False, 'error': '该组不存在或尚未归档编号'})
             continue
         enqueue_upload(conn, did)
+        retry_failed_archive_delivery(conn, did)
         ready = os.environ.get('WORKBENCH_NAS_PUBLISH_VERIFIED') == '1'
         message = None if ready else 'NAS 上传安全检查尚未完成，任务尚未开始'
         conn.execute("UPDATE nas_upload_jobs SET status=?,error=?,next_attempt_at=NULL,updated_at=datetime('now','localtime') WHERE design_id=? AND status IN ('failed','conflict','waiting','held')", ('queued' if ready else 'waiting',message,did,))
@@ -185,6 +192,21 @@ def validate_upload_source(conn, design_id):
     return {t: by_type[t]['version_id'] for t in required}
 
 
+def _content_sha256(data):
+    digest = hashlib.sha256()
+    if isinstance(data, Path):
+        with data.open('rb') as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                digest.update(chunk)
+    else:
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def _content_size(data):
+    return data.stat().st_size if isinstance(data, Path) else len(data)
+
+
 def confirm_manual(conn, design_id, user_id, role):
     job = conn.execute("SELECT j.id,j.status,d.status AS design_status,d.product_number FROM nas_upload_jobs j JOIN designs d ON d.id=j.design_id WHERE j.design_id=?", (design_id,)).fetchone()
     if not job or job['design_status'] != 'archived' or job['product_number'] is None:
@@ -206,7 +228,36 @@ def confirm_manual(conn, design_id, user_id, role):
 
 def process_one(factory=WebDav):
     with get_db(immediate=True) as conn:
-        row = conn.execute("SELECT * FROM nas_upload_jobs WHERE status IN ('queued','waiting') AND (next_attempt_at IS NULL OR next_attempt_at<=datetime('now','localtime')) ORDER BY created_at,id LIMIT 1").fetchone()
+        conn.execute("""
+            UPDATE nas_upload_jobs
+            SET status='failed',
+                error='规范图片后台准备终态失败，请检查原图、磁盘与后台日志后处理；NAS 未创建远端目录。',
+                next_attempt_at=NULL,
+                updated_at=datetime('now','localtime')
+            WHERE status IN ('queued','waiting')
+              AND design_id IN (
+                  SELECT design_id FROM archive_delivery_assets
+                  WHERE optimization_status='failed'
+              )
+        """)
+        row = conn.execute("""
+            SELECT j.*
+            FROM nas_upload_jobs j
+            WHERE j.status IN ('queued','waiting')
+              AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=datetime('now','localtime'))
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM archive_delivery_assets a
+                  WHERE a.design_id=j.design_id
+                  GROUP BY a.design_id
+                  HAVING COUNT(*) != 4
+                      OR COUNT(DISTINCT a.slot_type) != 4
+                      OR MIN(a.optimization_status) != 'ready'
+                      OR MAX(a.optimization_status) != 'ready'
+              )
+            ORDER BY j.created_at,j.id
+            LIMIT 1
+        """).fetchone()
         if not row:
             return False
         job = dict(row)
@@ -219,8 +270,22 @@ def process_one(factory=WebDav):
                 d = conn.execute('SELECT batch_id FROM designs WHERE id=?', (job['design_id'],)).fetchone()
                 if not d:
                     return True
-                wm, designs = _collect_export_data(conn, d['batch_id'], [job['design_id']])
                 versions = validate_upload_source(conn, job['design_id'])
+                png_delivery_ready = archive_delivery_is_ready(conn, job['design_id'])
+                if not png_delivery_ready:
+                    _save_status(job['id'], 'waiting', '规范 PNG 正在后台优化，稍后上传', '+5 seconds')
+                    return True
+                wm, designs = _collect_export_data(conn, d['batch_id'], [job['design_id']])
+                delivery_items = {
+                    row['slot_type']: {
+                        'image_format': row['image_format'] or 'png',
+                        'jpeg_quality': row['jpeg_quality'],
+                    }
+                    for row in conn.execute("""
+                        SELECT slot_type,image_format,jpeg_quality
+                        FROM archive_delivery_assets WHERE design_id=?
+                    """, (job['design_id'],))
+                }
             design = designs[0]
             images = render_product_images(wm, design)
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
@@ -229,13 +294,36 @@ def process_one(factory=WebDav):
             raise NasPreflightError('上传前检查失败：四图文件名或图片数量异常')
         with get_db(immediate=True) as conn:
             for slot, filename, data in images:
-                digest = hashlib.sha256(data).hexdigest()
-                old = conn.execute('SELECT filename,sha256,byte_count,slot_version_id FROM nas_upload_items WHERE job_id=? AND slot_type=?', (job['id'], slot)).fetchone()
-                if old and (old['filename'], old['sha256'], old['byte_count']) != (filename, digest, len(data)):
+                digest = _content_sha256(data)
+                byte_count = _content_size(data)
+                delivery_item = delivery_items.get(
+                    slot, {'image_format': 'png', 'jpeg_quality': None}
+                )
+                old = conn.execute(
+                    'SELECT filename,sha256,byte_count,slot_version_id,image_format,jpeg_quality '
+                    'FROM nas_upload_items WHERE job_id=? AND slot_type=?',
+                    (job['id'], slot),
+                ).fetchone()
+                current_signature = (
+                    filename, digest, byte_count, delivery_item['image_format'],
+                    delivery_item['jpeg_quality'],
+                )
+                if old and (
+                    old['filename'], old['sha256'], old['byte_count'],
+                    old['image_format'] or 'png', old['jpeg_quality'],
+                ) != current_signature:
                     raise NasConflict('本地归档图片或水印已变化，需人工核对')
                 if old and old['slot_version_id'] and old['slot_version_id'] != versions[slot]:
                     raise NasConflict('归档图片版本已变化，需人工核对')
-                conn.execute('INSERT OR IGNORE INTO nas_upload_items(job_id,slot_type,filename,sha256,byte_count,slot_version_id) VALUES (?,?,?,?,?,?)', (job['id'], slot, filename, digest, len(data), versions[slot]))
+                conn.execute(
+                    'INSERT OR IGNORE INTO nas_upload_items('
+                    'job_id,slot_type,filename,sha256,byte_count,slot_version_id,image_format,jpeg_quality'
+                    ') VALUES (?,?,?,?,?,?,?,?)',
+                    (
+                        job['id'], slot, filename, digest, byte_count, versions[slot],
+                        delivery_item['image_format'], delivery_item['jpeg_quality'],
+                    ),
+                )
                 conn.execute('UPDATE nas_upload_items SET slot_version_id=? WHERE job_id=? AND slot_type=? AND slot_version_id IS NULL', (versions[slot],job['id'],slot))
         remote = factory()
         code = format_product_code(design['product_number'])
@@ -265,7 +353,11 @@ def process_one(factory=WebDav):
             if not exists:
                 with get_db(immediate=True) as conn:
                     conn.execute("UPDATE nas_upload_items SET status='uploading' WHERE job_id=? AND slot_type=?", (job['id'], slot))
-                remote.put_new(path, data)
+                if isinstance(data, Path):
+                    with data.open('rb') as source:
+                        remote.put_new(path, source)
+                else:
+                    remote.put_new(path, data)
             with get_db(immediate=True) as conn:
                 conn.execute("UPDATE nas_upload_items SET status='uploaded_unverified' WHERE job_id=? AND slot_type=?", (job['id'], slot))
         _save_status(job['id'], 'awaiting_review')
@@ -274,6 +366,11 @@ def process_one(factory=WebDav):
     except NasConflict as exc:
         _save_status(job['id'], 'conflict', str(exc))
     except Exception as exc:
+        logger.warning(
+            'NAS 上传过程发生异常（%s%s），任务将保持可重试',
+            type(exc).__name__,
+            f":{exc.name}" if isinstance(exc, AttributeError) else "",
+        )
         # Avoid leaking remote URLs, credentials, paths, or raw server responses.
         msg = str(exc) if isinstance(exc, (RuntimeError, ValueError, FileNotFoundError)) else 'NAS 连接中断或超时，稍后检查目标并重试'
         if 'http' in msg.lower() and not msg.startswith(('查询远端','图片上传','远端图片','创建产品')):

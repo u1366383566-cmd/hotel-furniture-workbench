@@ -1,11 +1,16 @@
 from typing import List
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from ..database import get_db
 from ..config import EXPORTS_DIR
 from ..security import UserContext, require_roles, safe_file_path
-from ..export_service import _collect_export_data, _assemble_watermarked_zip, _record_exports
+from ..export_service import (
+    _collect_export_data,
+    _assemble_watermarked_zip,
+    _record_exports,
+    inspect_archive_delivery,
+)
 
 router = APIRouter(prefix="/api/export", tags=["Export"])
 
@@ -25,13 +30,42 @@ class SelectedExportRequest(BaseModel):
     design_ids: List[str] = Field(..., min_length=1)
 
 
+def _design_batch_id(design_id):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT batch_id FROM designs WHERE id=?", (design_id,)
+        ).fetchone()
+    return row["batch_id"] if row else None
+
+
+def _delivery_gate(batch_id, design_ids, retry_failed):
+    delivery = inspect_archive_delivery(batch_id, design_ids, retry_failed=retry_failed)
+    if delivery["status"] == "ready":
+        return None
+    detail = {
+        "code": f"archive_delivery_{delivery['status']}",
+        "message": delivery["message"],
+        "delivery": delivery,
+    }
+    if delivery["status"] == "pending":
+        return JSONResponse(status_code=202, content=delivery)
+    status_code = 400 if delivery["status"] == "input_error" else 409
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 @router.post("/design/{design_id}")
 def export_single_design(
     design_id: str,
+    retry_failed: bool = False,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"])),
 ):
     """导出单款归档设计的带水印 ZIP"""
-    # Phase 1 – brief DB read to validate + collect data
+    row_batch_id = _design_batch_id(design_id)
+    if row_batch_id is None:
+        raise HTTPException(status_code=404, detail="设计不存在")
+    pending = _delivery_gate(row_batch_id, [design_id], retry_failed)
+    if pending is not None:
+        return pending
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT batch_id, status FROM designs WHERE id = ?", (design_id,))
@@ -41,10 +75,12 @@ def export_single_design(
         if row["status"] != "archived":
             raise HTTPException(status_code=400, detail="该设计尚未终审归档，禁止导出！")
         batch_id = row["batch_id"]
+        if batch_id != row_batch_id:
+            raise HTTPException(status_code=409, detail="设计所属批次已变化，请刷新后重试")
         try:
             wm_cfg, designs_data = _collect_export_data(conn, batch_id, [design_id])
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     # Phase 2 – watermark + ZIP assembly, NO DB lock held
     try:
@@ -65,6 +101,7 @@ def export_single_design(
 @router.post("/selected")
 def export_selected_designs(
     req: SelectedExportRequest,
+    retry_failed: bool = False,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"])),
 ):
     """部分导出：导出指定的若干已归档设计"""
@@ -85,10 +122,14 @@ def export_selected_designs(
                     status_code=400,
                     detail=f"设计 {r['design_code']} 尚未完成归档，禁止部分导出！",
                 )
+    pending = _delivery_gate(req.batch_id, req.design_ids, retry_failed)
+    if pending is not None:
+        return pending
+    with get_db() as conn:
         try:
             wm_cfg, designs_data = _collect_export_data(conn, req.batch_id, req.design_ids)
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     # Phase 2 – watermark + ZIP, NO DB lock held
     try:
@@ -110,6 +151,7 @@ def export_selected_designs(
 @router.post("/batch/{batch_id}")
 def export_batch_archived(
     batch_id: str,
+    retry_failed: bool = False,
     user: UserContext = Depends(require_roles(["operator", "leader", "admin"])),
 ):
     """导出批次中全部已归档设计的带水印 ZIP"""
@@ -123,10 +165,14 @@ def export_batch_archived(
         if not rows:
             raise HTTPException(status_code=400, detail="批次中暂无已归档的设计，无法导出")
         dids = [r["id"] for r in rows]
+    pending = _delivery_gate(batch_id, dids, retry_failed)
+    if pending is not None:
+        return pending
+    with get_db() as conn:
         try:
             wm_cfg, designs_data = _collect_export_data(conn, batch_id, dids)
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     # Phase 2 – watermark + ZIP, NO DB lock held
     try:

@@ -37,6 +37,11 @@ def client():
         with get_db(immediate=True) as conn:
             conn.execute("DELETE FROM batches")
             conn.execute("UPDATE nas_upload_settings SET auto_enabled=0,test_design_id=NULL WHERE id=1")
+            conn.execute(
+                "UPDATE archive_delivery_settings "
+                "SET image_format='png',updated_by=NULL,updated_at=datetime('now','localtime') "
+                "WHERE id=1"
+            )
             conn.execute("""UPDATE workbench_settings
                 SET warning_per_group=5,hard_limit_per_group=6,
                     auto_release_unknown=0,auto_retry_request_failures=0

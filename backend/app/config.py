@@ -8,8 +8,10 @@ DB_DIR = STORAGE_DIR / "db"
 RAW_IMAGES_DIR = STORAGE_DIR / "raw_images"
 PREVIEW_IMAGES_DIR = STORAGE_DIR / "preview_images"
 EXPORTS_DIR = STORAGE_DIR / "exports"
+ARCHIVE_DELIVERY_DIR = STORAGE_DIR / "archive_delivery"
+MAX_ARCHIVE_JPG_BYTES = 700000
 
-for d in [STORAGE_DIR, DB_DIR, RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, EXPORTS_DIR]:
+for d in [STORAGE_DIR, DB_DIR, RAW_IMAGES_DIR, PREVIEW_IMAGES_DIR, EXPORTS_DIR, ARCHIVE_DELIVERY_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = Path(os.environ.get("WORKBENCH_DB_PATH", DB_DIR / "workbench.db")).resolve()
